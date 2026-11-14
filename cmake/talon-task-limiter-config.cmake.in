@@ -1,0 +1,8 @@
+@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+if(NOT TARGET talon::status)
+  find_dependency(talon-status 0.1 CONFIG)
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/talon-task-limiter-targets.cmake")
+check_required_components(talon-task-limiter)

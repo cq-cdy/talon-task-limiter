@@ -1,0 +1,8 @@
+/build*/
+/install*/
+/.cache/
+/CMakeUserPresets.json
+*.profraw
+*.profdata
+*.gcda
+*.gcno
