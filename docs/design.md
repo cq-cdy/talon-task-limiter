@@ -64,6 +64,8 @@ Reservation 管理接纳失败回滚。任务成功发布后 worker 管理完成
 
 线程局部变量记录当前 worker 所属执行器。提交期间的 Reservation 使用线程局部链表跟踪嵌套接纳，覆盖“捕获构造函数递归提交到另一个执行器，再等待外层执行器”的自等待情形。
 
+worker 身份在循环返回后也保留到线程退出，以覆盖用户 `thread_local` 析构回调。对象在 join 完成前保持存活；该 TLS 指针是平凡对象，不需要主动清零。`WaitIdle` 的屏障不包含线程局部析构，`Shutdown` 的 join 包含这一阶段。
+
 `WaitIdle` / `Shutdown` 在取得 join 锁前检查当前执行器是否出现在这些上下文中。拒绝自身等待不会关闭执行器。任务捕获析构时，worker 标记和额度仍然有效。
 
 join 锁只由外部 Shutdown 调用者持有，串行化 `std::thread::join`；这些调用者可能再短暂取得状态锁。worker 永远不取得 join 锁，状态锁不会跨越 join 或用户代码。不存在内部反向获取顺序。互斥锁解锁/加锁以及最终 join 建立任务写入的可见性。
@@ -77,3 +79,5 @@ join 锁只由外部 Shutdown 调用者持有，串行化 `std::thread::join`；
 与给出的片段相比，`Schedule` 的名称、完美转发、满载拒绝、不可复制移动和构造方式保持一致。返回类型从 `absl::Status` 改为 `talon::Status`，放在 `talon` 命名空间。没有依赖来源不明的 `ThreadPool`；线程资源由库自身拥有。
 
 公共非模板实现经 PImpl 隔离；模板节点放在标记为 internal 的头中。`StatusOr` 工厂在调用端内联构造，降低可变后端跨动态库边界的风险。应用中 talon-status 的后端和 ABI 配置仍须一致；不保证任意版本或不同 CRT 的 ABI 兼容。
+
+本轮对空原始 callable/member pointer、空标准成员目标增加运行时拒绝；future 的值结果增加可移动和 noexcept 析构约束。可空输入校验仍在满载/关闭判断之后。普通错误走 Status，原构造接口和标准库/用户异常清理边界保留兼容行为，详见 [style.md](style.md)。

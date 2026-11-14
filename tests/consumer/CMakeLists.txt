@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
 project(task-limiter-consumer LANGUAGES CXX)
+if(DEFINED EXPECTED_PREFIX_COUNT)
+  list(LENGTH CMAKE_PREFIX_PATH actual_prefix_count)
+  if(NOT actual_prefix_count EQUAL EXPECTED_PREFIX_COUNT)
+    message(FATAL_ERROR "CMAKE_PREFIX_PATH list was not forwarded intact")
+  endif()
+endif()
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "Consumer language mode")
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -26,19 +32,29 @@ if(CHECK_COMPILE_FAILURES)
   if(NOT baseline_ok)
     message(FATAL_ERROR "Compile-failure baseline is broken: ${baseline_output}")
   endif()
-  foreach(case IN ITEMS not_callable lvalue_only throwing_destructor rvalue_result copy_executor)
+  foreach(case IN ITEMS not_callable lvalue_only throwing_destructor
+      rvalue_result copy_executor throwing_result_destructor immovable_result
+      throwing_argument_destructor move_only_lvalue borrow_requires_ref
+      noncopyable_callable_lvalue wrong_arity const_borrow_mutation
+      move_executor assign_executor move_assign_executor)
     try_compile(unexpected_success "${CMAKE_CURRENT_BINARY_DIR}/negative/${case}"
       SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../compile_fail/${case}.cc"
       LINK_LIBRARIES talon::task_limiter OUTPUT_VARIABLE diagnostic)
     if(unexpected_success)
       message(FATAL_ERROR "Expected ${case}.cc to fail compilation")
     endif()
-    if(case STREQUAL "not_callable" OR case STREQUAL "lvalue_only")
+    if(case MATCHES "^(not_callable|lvalue_only|borrow_requires_ref|wrong_arity|const_borrow_mutation)$")
       set(expected "Task must be invocable")
-    elseif(case STREQUAL "throwing_destructor")
+    elseif(case MATCHES "^(throwing_destructor|throwing_argument_destructor)$")
       set(expected "Task captures must have noexcept destructors")
     elseif(case STREQUAL "rvalue_result")
       set(expected "std::future does not support rvalue reference results")
+    elseif(case MATCHES "^(throwing_result_destructor|immovable_result)$")
+      set(expected "Future value results must be move-constructible")
+    elseif(case STREQUAL "move_only_lvalue")
+      # The unavailable tuple construction is diagnosed differently by each
+      # standard library; all compilers must reject copying the move-only arg.
+      set(expected "(deleted|no matching|no suitable|cannot convert|no overloaded)")
     else()
       set(expected "deleted")
     endif()

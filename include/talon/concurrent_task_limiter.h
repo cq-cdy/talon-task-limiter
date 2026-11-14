@@ -10,9 +10,7 @@
 #include <future>
 #include <memory>
 #include <new>
-#include <stdexcept>
 #include <system_error>
-#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -44,6 +42,7 @@ class ConcurrentTaskLimiter final {
 
   struct Snapshot {
     int32_t max_concurrent;
+    // Configured worker count; does not become zero after Shutdown.
     int32_t worker_count;
     bool accepting;
     std::size_t outstanding;
@@ -75,10 +74,12 @@ class ConcurrentTaskLimiter final {
       Options options) {
     // Keep StatusOr in the caller's translation unit: its AUTO backend depends
     // on the language mode, so it must not cross the compiled library boundary.
+    Status status = ValidateOptions(options);
+    if (!status.ok()) {
+      return status;
+    }
     try {
       return std::make_unique<ConcurrentTaskLimiter>(std::move(options));
-    } catch (const std::invalid_argument& error) {
-      return InvalidArgumentError(error.what());
     } catch (const std::bad_alloc&) {
       return ResourceExhaustedError("Cannot allocate executor resources");
     } catch (const std::system_error& error) {
@@ -92,6 +93,8 @@ class ConcurrentTaskLimiter final {
   // does not copy/move func or args. Construction exceptions propagate to the
   // caller and release the reserved slot. A successful reservation is accepted
   // even if Close races with subsequent task construction.
+  // A null raw callable, member pointer, or standard member target returns
+  // InvalidArgument after admission succeeds, without publishing a task.
   template <typename Func, typename... Args>
   [[nodiscard]] Status Schedule(Func&& func, Args&&... args) {
     static_assert(
@@ -99,8 +102,13 @@ class ConcurrentTaskLimiter final {
         "Task must be invocable with decayed rvalues; use std::ref "
         "for borrowed lvalues");
     Status status = TryAcquire();
-    if (!status.ok()) return status;
+    if (!status.ok()) {
+      return status;
+    }
     Reservation reservation(this);
+    if (task_limiter_internal::HasNullInvocationTarget(func, args...)) {
+      return InvalidArgumentError("Task callable or member target is null");
+    }
     auto task = std::make_unique<task_limiter_internal::TaskFor<Func, Args...>>(
         std::forward<Func>(func), std::forward<Args>(args)...);
     Enqueue(std::move(task));
@@ -116,8 +124,13 @@ class ConcurrentTaskLimiter final {
       std::future<task_limiter_internal::ResultFor<Func, Args...>>> {
     using Result = task_limiter_internal::ResultFor<Func, Args...>;
     Status status = TryAcquire();
-    if (!status.ok()) return status;
+    if (!status.ok()) {
+      return status;
+    }
     Reservation reservation(this);
+    if (task_limiter_internal::HasNullInvocationTarget(func, args...)) {
+      return InvalidArgumentError("Task callable or member target is null");
+    }
     auto task = std::make_unique<task_limiter_internal::FutureTask<
         Result, std::decay_t<Func>, std::decay_t<Args>...>>(
         std::forward<Func>(func), std::forward<Args>(args)...);
@@ -134,12 +147,14 @@ class ConcurrentTaskLimiter final {
   // Waits for an observed idle point, including capture destruction. New
   // admissions may follow unless Close has been called. Same-executor tasks
   // and submission callbacks get FailedPrecondition instead of self-waiting.
+  // Worker thread_local destruction is covered by Shutdown, not by WaitIdle.
   [[nodiscard]] TALON_TASK_LIMITER_EXPORT Status WaitIdle();
   [[nodiscard]] TALON_TASK_LIMITER_EXPORT Status
   WaitIdleUntil(std::chrono::steady_clock::time_point deadline);
 
-  // Close + drain + join. Concurrent callers are supported. Same-executor
-  // callbacks get FailedPrecondition without changing the accepting state.
+  // Close + drain + join, including worker thread_local destruction. Concurrent
+  // callers are supported. Same-executor callbacks (also at thread exit) get
+  // FailedPrecondition without changing the accepting state.
   [[nodiscard]] TALON_TASK_LIMITER_EXPORT Status Shutdown();
 
   // One coherent observation, not a capacity reservation.
@@ -149,9 +164,9 @@ class ConcurrentTaskLimiter final {
   class TALON_TASK_LIMITER_EXPORT Reservation {
    public:
     explicit Reservation(ConcurrentTaskLimiter* owner) noexcept;
-    ~Reservation();
     Reservation(const Reservation&) = delete;
     Reservation& operator=(const Reservation&) = delete;
+    ~Reservation();
     void Commit() noexcept { committed_ = true; }
     static bool Contains(const ConcurrentTaskLimiter* owner) noexcept;
 
@@ -162,13 +177,16 @@ class ConcurrentTaskLimiter final {
     bool committed_ = false;
   };
 
+  class Impl;
+
+  [[nodiscard]] TALON_TASK_LIMITER_EXPORT static Status ValidateOptions(
+      const Options& options);
   [[nodiscard]] TALON_TASK_LIMITER_EXPORT Status TryAcquire();
   TALON_TASK_LIMITER_EXPORT void ReleaseReservation() noexcept;
   TALON_TASK_LIMITER_EXPORT void Enqueue(
       std::unique_ptr<task_limiter_internal::Task> task);
   bool IsSelfWait() const noexcept;
 
-  struct Impl;
   std::unique_ptr<Impl> impl_;
 };
 

@@ -6,12 +6,17 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
-#include <stdexcept>
 #include <thread>
 
 namespace talon_test {
-using namespace std::chrono_literals;
+[[noreturn]] inline void FailSynchronization(const char* message) {
+  std::fputs(message, stderr);
+  std::fputc('\n', stderr);
+  std::abort();
+}
 
 // Test synchronization uses predicates, not scheduling assumptions or sleeps.
 // A bounded wait turns most broken protocols into a useful failure, not a hang.
@@ -26,8 +31,9 @@ class Gate {
   }
   void Wait() {
     std::unique_lock<std::mutex> lock(mutex_);
-    if (!cv_.wait_for(lock, 20s, [this] { return open_; })) {
-      throw std::runtime_error("Test gate timed out");
+    if (!cv_.wait_for(lock, std::chrono::seconds(20),
+                      [this] { return open_; })) {
+      FailSynchronization("Test gate timed out");
     }
   }
 
@@ -53,13 +59,18 @@ class Countdown {
   explicit Countdown(std::size_t count) : count_(count) {}
   void Arrive() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (count_ == 0) throw std::logic_error("Countdown underflow");
-    if (--count_ == 0) cv_.notify_all();
+    if (count_ == 0) {
+      FailSynchronization("Countdown underflow");
+    }
+    if (--count_ == 0) {
+      cv_.notify_all();
+    }
   }
   void Wait() {
     std::unique_lock<std::mutex> lock(mutex_);
-    if (!cv_.wait_for(lock, 20s, [this] { return count_ == 0; })) {
-      throw std::runtime_error("Test countdown timed out");
+    if (!cv_.wait_for(lock, std::chrono::seconds(20),
+                      [this] { return count_ == 0; })) {
+      FailSynchronization("Test countdown timed out");
     }
   }
 
@@ -79,10 +90,11 @@ inline void UpdatePeak(std::atomic<int>& peak, int current) {
 
 template <typename Predicate>
 void SpinUntil(Predicate predicate) {
-  const auto deadline = std::chrono::steady_clock::now() + 20s;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(20);
   while (!predicate()) {
     if (std::chrono::steady_clock::now() >= deadline) {
-      throw std::runtime_error("Test condition timed out");
+      FailSynchronization("Test condition timed out");
     }
     std::this_thread::yield();
   }

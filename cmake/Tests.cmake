@@ -1,14 +1,20 @@
 include(GoogleTest)
 add_executable(talon_task_limiter_test
-  tests/api_test.cc tests/lifecycle_test.cc tests/concurrency_test.cc)
+  tests/api_test.cc tests/lifecycle_test.cc tests/concurrency_test.cc
+  tests/history_test.cc tests/reservation_matrix_test.cc
+  tests/reentrancy_stress_test.cc tests/invocation_test.cc)
 target_link_libraries(talon_task_limiter_test PRIVATE talon::task_limiter GTest::gtest_main)
 talon_task_limiter_target(talon_task_limiter_test)
-gtest_discover_tests(talon_task_limiter_test DISCOVERY_MODE PRE_TEST
+gtest_discover_tests(talon_task_limiter_test DISCOVERY_MODE PRE_TEST NO_PRETTY_VALUES
   TEST_PREFIX "limiter." PROPERTIES TIMEOUT 90)
 
 # Allocation replacement is isolated from ASan's allocator interposition.
 if(TALON_TASK_LIMITER_SANITIZER STREQUAL "none")
-  add_executable(talon_task_limiter_allocation_test tests/allocation_test.cc)
+  add_executable(talon_task_limiter_allocation_test
+    tests/allocation_test.cc tests/allocation_failure.cc)
+  # Keep allocation interposition opaque even if a parent enables global LTO.
+  set_target_properties(talon_task_limiter_allocation_test PROPERTIES
+    INTERPROCEDURAL_OPTIMIZATION FALSE)
   target_link_libraries(talon_task_limiter_allocation_test PRIVATE talon::task_limiter GTest::gtest_main)
   talon_task_limiter_target(talon_task_limiter_allocation_test)
   gtest_discover_tests(talon_task_limiter_allocation_test DISCOVERY_MODE PRE_TEST
@@ -18,7 +24,7 @@ if(TALON_TASK_LIMITER_SANITIZER STREQUAL "none")
     target_link_libraries(talon_task_limiter_thread_failure_test PRIVATE
       talon::task_limiter GTest::gtest_main ${CMAKE_DL_LIBS})
     talon_task_limiter_target(talon_task_limiter_thread_failure_test)
-    gtest_discover_tests(talon_task_limiter_thread_failure_test DISCOVERY_MODE PRE_TEST
+    gtest_discover_tests(talon_task_limiter_thread_failure_test DISCOVERY_MODE PRE_TEST NO_PRETTY_VALUES
       TEST_PREFIX "limiter." PROPERTIES TIMEOUT 90)
   endif()
 endif()
@@ -29,7 +35,17 @@ target_link_libraries(talon_task_limiter_header_test PRIVATE talon::task_limiter
 talon_task_limiter_target(talon_task_limiter_header_test)
 add_test(NAME limiter.headers COMMAND talon_task_limiter_header_test)
 
-if(TALON_TASK_LIMITER_SANITIZER STREQUAL "none" AND NOT CMAKE_CROSSCOMPILING)
+if(NOT TALON_TASK_LIMITER_SANITIZER STREQUAL "none")
+  # Deliberately omit talon_task_limiter_target(): this consumer must link using
+  # only the exported usage requirements of the instrumented library.
+  add_executable(talon_task_limiter_sanitizer_consumer
+    tests/consumer/main.cc tests/consumer/other.cc)
+  target_link_libraries(talon_task_limiter_sanitizer_consumer PRIVATE talon::task_limiter)
+  set_target_properties(talon_task_limiter_sanitizer_consumer PROPERTIES CXX_EXTENSIONS OFF)
+  add_test(NAME limiter.sanitizer_consumer COMMAND talon_task_limiter_sanitizer_consumer)
+endif()
+
+if(NOT CMAKE_CROSSCOMPILING)
   add_test(NAME limiter.package
     COMMAND ${CMAKE_COMMAND}
       "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
@@ -44,6 +60,8 @@ if(TALON_TASK_LIMITER_SANITIZER STREQUAL "none" AND NOT CMAKE_CROSSCOMPILING)
       "-DCXX_FLAGS_RELEASE=${CMAKE_CXX_FLAGS_RELEASE}"
       "-DCXX_FLAGS_RELWITHDEBINFO=${CMAKE_CXX_FLAGS_RELWITHDEBINFO}"
       "-DCXX_FLAGS_MINSIZEREL=${CMAKE_CXX_FLAGS_MINSIZEREL}"
+      "-DEXE_LINKER_FLAGS=${CMAKE_EXE_LINKER_FLAGS}"
+      "-DSHARED_LINKER_FLAGS=${CMAKE_SHARED_LINKER_FLAGS}"
       "-DMSVC_RUNTIME=${CMAKE_MSVC_RUNTIME_LIBRARY}"
       "-DOSX_ARCHITECTURES=${CMAKE_OSX_ARCHITECTURES}"
       "-DOSX_SYSROOT=${CMAKE_OSX_SYSROOT}"

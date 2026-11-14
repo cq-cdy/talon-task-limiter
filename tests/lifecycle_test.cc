@@ -17,7 +17,72 @@ using talon::StatusCode;
 using talon_test::Countdown;
 using talon_test::Gate;
 using talon_test::OpenOnExit;
-using namespace std::chrono_literals;
+
+TEST(Lifecycle, ThreadLocalDestructorsCannotSelfJoinAtWorkerExit) {
+  std::atomic<int> cleaned{0};
+  ConcurrentTaskLimiter limiter(1);
+  class ExitAction {
+   public:
+    explicit ExitAction(std::function<void()> action)
+        : action_(std::move(action)) {}
+    ~ExitAction() { action_(); }
+
+   private:
+    std::function<void()> action_;
+  };
+  auto result = limiter.Submit([&] {
+    thread_local std::unique_ptr<ExitAction> on_exit;
+    on_exit = std::make_unique<ExitAction>([&] {
+      EXPECT_EQ(limiter.Shutdown().code(), StatusCode::kFailedPrecondition);
+      EXPECT_EQ(limiter.WaitIdle().code(), StatusCode::kFailedPrecondition);
+      EXPECT_EQ(limiter.GetSnapshot().outstanding, 0U);
+      limiter.Close();
+      cleaned.fetch_add(1);
+    });
+  });
+  ASSERT_TRUE(result.ok());
+  result->get();
+  EXPECT_TRUE(limiter.Shutdown().ok());
+  EXPECT_EQ(cleaned.load(), 1);
+}
+
+TEST(Lifecycle, ShutdownIncludesThreadLocalDestructionButIdleDoesNot) {
+  Gate destructor_entered;
+  Gate release_destructor;
+  std::atomic<int> cleaned{0};
+  ConcurrentTaskLimiter limiter(1);
+  class ExitAction {
+   public:
+    explicit ExitAction(std::function<void()> action)
+        : action_(std::move(action)) {}
+    ~ExitAction() { action_(); }
+
+   private:
+    std::function<void()> action_;
+  };
+  auto result = limiter.Submit([&] {
+    thread_local std::unique_ptr<ExitAction> on_exit;
+    on_exit = std::make_unique<ExitAction>([&] {
+      destructor_entered.Open();
+      release_destructor.Wait();
+      cleaned.fetch_add(1);
+    });
+  });
+  ASSERT_TRUE(result.ok());
+  result->get();
+  EXPECT_TRUE(limiter.WaitIdle().ok());
+  EXPECT_EQ(cleaned.load(), 0);
+  auto shutdown =
+      std::async(std::launch::async, [&] { return limiter.Shutdown(); });
+  OpenOnExit cleanup(release_destructor);
+  destructor_entered.Wait();
+  EXPECT_TRUE(limiter.WaitIdle().ok());
+  EXPECT_EQ(shutdown.wait_for(std::chrono::seconds(0)),
+            std::future_status::timeout);
+  release_destructor.Open();
+  EXPECT_TRUE(shutdown.get().ok());
+  EXPECT_EQ(cleaned.load(), 1);
+}
 
 TEST(Lifecycle, EmptyWaitAndRepeatedShutdown) {
   ConcurrentTaskLimiter limiter(2);
@@ -47,8 +112,10 @@ TEST(Lifecycle, DeadlineDoesNotCancelTasks) {
   EXPECT_TRUE(limiter.GetSnapshot().accepting);
   EXPECT_EQ(limiter.GetSnapshot().outstanding, 1U);
   gate.Open();
-  EXPECT_TRUE(
-      limiter.WaitIdleUntil(std::chrono::steady_clock::now() + 20s).ok());
+  EXPECT_TRUE(limiter
+                  .WaitIdleUntil(std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(20))
+                  .ok());
   EXPECT_EQ(result->get(), 42);
 }
 
@@ -173,15 +240,18 @@ TEST(Lifecycle, WaitingOnDifferentExecutorIsAllowed) {
   result->get();
 }
 
-struct CopyCallback {
+class CopyCallback {
+ public:
   explicit CopyCallback(std::function<void()> callback)
-      : callback(std::move(callback)) {}
-  CopyCallback(const CopyCallback& other) : callback(other.callback) {
-    callback();
+      : callback_(std::move(callback)) {}
+  CopyCallback(const CopyCallback& other) : callback_(other.callback_) {
+    callback_();
   }
   CopyCallback(CopyCallback&&) = default;
   void operator()() {}
-  std::function<void()> callback;
+
+ private:
+  std::function<void()> callback_;
 };
 
 TEST(Lifecycle, CaptureConstructorCanInspectAndCannotSelfWait) {
@@ -238,7 +308,8 @@ TEST(Lifecycle, CloseDuringConstructionStillPublishesAcceptedTask) {
             StatusCode::kDeadlineExceeded);
   auto shutdown =
       std::async(std::launch::async, [&] { return limiter.Shutdown(); });
-  EXPECT_EQ(shutdown.wait_for(0s), std::future_status::timeout);
+  EXPECT_EQ(shutdown.wait_for(std::chrono::seconds(0)),
+            std::future_status::timeout);
   proceed.Open();
   EXPECT_TRUE(submission.get().ok());
   EXPECT_TRUE(shutdown.get().ok());
@@ -281,11 +352,14 @@ TEST(Lifecycle, CaptureCanCloseThenThrowAndReservationRollsBack) {
   EXPECT_EQ(limiter.GetSnapshot().outstanding, 0U);
 }
 
-struct DestructorCallback {
+class DestructorCallback {
+ public:
   explicit DestructorCallback(std::function<void()> callback)
-      : callback(std::move(callback)) {}
-  ~DestructorCallback() { callback(); }
-  std::function<void()> callback;
+      : callback_(std::move(callback)) {}
+  ~DestructorCallback() { callback_(); }
+
+ private:
+  std::function<void()> callback_;
 };
 
 TEST(Lifecycle, CaptureDestructorRunsUnlockedAndRetainsItsSlot) {
@@ -344,7 +418,8 @@ TEST(Lifecycle, FailedConstructionDestroysEarlierCaptureOutsideLock) {
     EXPECT_EQ(limiter.WaitIdle().code(), StatusCode::kFailedPrecondition);
     ++destroyed;
   });
-  struct FailingArgument {
+  class FailingArgument {
+   public:
     FailingArgument() = default;
     FailingArgument(const FailingArgument&) { throw 17; }
   } argument;
@@ -397,7 +472,8 @@ TEST(Lifecycle, DestructorDrainsAllAcceptedTasks) {
       });
   OpenOnExit cleanup(proceed);
   destroying.Wait();
-  EXPECT_EQ(destruction.wait_for(0s), std::future_status::timeout);
+  EXPECT_EQ(destruction.wait_for(std::chrono::seconds(0)),
+            std::future_status::timeout);
   proceed.Open();
   destruction.get();
   EXPECT_EQ(calls.load(), 32);

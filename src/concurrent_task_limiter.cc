@@ -20,51 +20,52 @@ ConcurrentTaskLimiter::Options WithLimit(int32_t max_concurrent) {
 }
 }  // namespace
 
-struct ConcurrentTaskLimiter::Impl {
+class ConcurrentTaskLimiter::Impl {
+ public:
   explicit Impl(ConcurrentTaskLimiter* owner, Options options)
-      : max_concurrent(options.max_concurrent),
-        worker_count(options.worker_count == 0 ? options.max_concurrent
-                                               : options.worker_count),
-        exception_handler(std::move(options.on_unhandled_exception)) {
-    if (max_concurrent <= 0) {
-      throw std::invalid_argument("max_concurrent must be positive");
-    }
-    if (worker_count <= 0 || worker_count > max_concurrent) {
-      throw std::invalid_argument(
-          "worker_count must be in [1, max_concurrent]");
-    }
-    workers.reserve(static_cast<std::size_t>(worker_count));
+      : max_concurrent_(options.max_concurrent),
+        worker_count_(options.worker_count == 0 ? options.max_concurrent
+                                                : options.worker_count),
+        exception_handler_(std::move(options.on_unhandled_exception)) {
+    workers_.reserve(static_cast<std::size_t>(worker_count_));
     try {
-      for (int32_t i = 0; i < worker_count; ++i) {
-        workers.emplace_back([this, owner] { WorkerLoop(owner); });
+      for (int32_t i = 0; i < worker_count_; ++i) {
+        workers_.emplace_back([this, owner] { WorkerLoop(owner); });
       }
     } catch (...) {
       // A throwing constructor does not run ~Impl. Join every worker already
       // started before allowing mutexes and condition variables to be
       // destroyed.
       Close();
-      for (auto& worker : workers) worker.join();
+      for (auto& worker : workers_) {
+        worker.join();
+      }
       throw;
     }
   }
 
   void Close() {
     {
-      std::lock_guard<std::mutex> lock(mutex);
-      accepting = false;
+      std::lock_guard<std::mutex> lock(mutex_);
+      accepting_ = false;
     }
-    work_ready.notify_all();
+    work_ready_.notify_all();
   }
 
-  // Called with mutex held, after either rollback or payload destruction.
+ private:
+  friend class ConcurrentTaskLimiter;
+
+  // Called with mutex_ held, after either rollback or payload destruction.
   void ReleaseSlot() noexcept {
-    assert(outstanding > 0);
-    --outstanding;
-    if (outstanding == 0) {
-      idle.notify_all();
+    assert(outstanding_ > 0);
+    --outstanding_;
+    if (outstanding_ == 0) {
+      idle_.notify_all();
       // On close, workers must wait for constructing reservations too. A
       // rollback may be the final transition that lets them exit.
-      if (!accepting) work_ready.notify_all();
+      if (!accepting_) {
+        work_ready_.notify_all();
+      }
     }
   }
 
@@ -73,24 +74,30 @@ struct ConcurrentTaskLimiter::Impl {
     for (;;) {
       std::unique_ptr<task_limiter_internal::Task> task;
       {
-        std::unique_lock<std::mutex> lock(mutex);
-        work_ready.wait(lock, [this] {
-          return head != nullptr || (!accepting && outstanding == 0);
+        std::unique_lock<std::mutex> lock(mutex_);
+        work_ready_.wait(lock, [this] {
+          return head_ != nullptr || (!accepting_ && outstanding_ == 0);
         });
-        if (!head) break;
-        task = std::move(head);
-        head = std::move(task->next);
-        if (!head) tail = nullptr;
-        --queued;
-        ++running;
+        if (!head_) {
+          break;
+        }
+        task = std::move(head_);
+        head_ = task->TakeNext();
+        if (!head_) {
+          tail_ = nullptr;
+        }
+        --queued_;
+        ++running_;
       }
       try {
         task->Run();
       } catch (...) {
         // Schedule has no future. Never silently discard its exceptions.
-        if (!exception_handler) std::terminate();
+        if (!exception_handler_) {
+          std::terminate();
+        }
         try {
-          exception_handler(std::current_exception());
+          exception_handler_(std::current_exception());
         } catch (...) {
           std::terminate();
         }
@@ -99,31 +106,35 @@ struct ConcurrentTaskLimiter::Impl {
       // marker and its slot until all user-owned captures have been destroyed.
       task.reset();
       {
-        std::lock_guard<std::mutex> lock(mutex);
-        --running;
+        std::lock_guard<std::mutex> lock(mutex_);
+        --running_;
         ReleaseSlot();
       }
     }
-    current_executor = nullptr;
+    // Keep the marker through user thread_local destructors. They run after
+    // WorkerLoop returns and may reenter Shutdown while an external caller is
+    // joining this thread. The owner remains alive until that join completes;
+    // this trivially destructible TLS pointer then disappears with the thread.
   }
 
-  const int32_t max_concurrent;
-  const int32_t worker_count;
-  const std::function<void(std::exception_ptr)> exception_handler;
-  mutable std::mutex mutex;
-  std::condition_variable work_ready;
-  std::condition_variable idle;
-  bool accepting = true;
-  std::size_t outstanding = 0;
-  std::size_t queued = 0;
-  std::size_t running = 0;
-  std::unique_ptr<task_limiter_internal::Task> head;
-  task_limiter_internal::Task* tail = nullptr;
+  const int32_t max_concurrent_;
+  const int32_t worker_count_;
+  const std::function<void(std::exception_ptr)> exception_handler_;
+  mutable std::mutex mutex_;
+  std::condition_variable work_ready_;
+  std::condition_variable idle_;
+  bool accepting_ = true;
+  std::size_t outstanding_ = 0;
+  std::size_t queued_ = 0;
+  std::size_t running_ = 0;
+  std::unique_ptr<task_limiter_internal::Task> head_;
+  task_limiter_internal::Task* tail_ = nullptr;
 
-  // Only external Shutdown callers acquire join_mutex, then mutex (via Close).
-  // Workers never acquire join_mutex, including their self-wait error path.
-  std::mutex join_mutex;
-  std::vector<std::thread> workers;
+  // Only external Shutdown callers acquire join_mutex_, then mutex_ (via
+  // Close). Workers never acquire join_mutex_, including their self-wait error
+  // path.
+  std::mutex join_mutex_;
+  std::vector<std::thread> workers_;
 };
 
 thread_local ConcurrentTaskLimiter::Reservation*
@@ -136,7 +147,9 @@ ConcurrentTaskLimiter::Reservation::Reservation(
 }
 
 ConcurrentTaskLimiter::Reservation::~Reservation() {
-  if (!committed_) owner_->ReleaseReservation();
+  if (!committed_) {
+    owner_->ReleaseReservation();
+  }
   current_ = previous_;
 }
 
@@ -144,7 +157,9 @@ bool ConcurrentTaskLimiter::Reservation::Contains(
     const ConcurrentTaskLimiter* owner) noexcept {
   for (auto* reservation = current_; reservation != nullptr;
        reservation = reservation->previous_) {
-    if (reservation->owner_ == owner) return true;
+    if (reservation->owner_ == owner) {
+      return true;
+    }
   }
   return false;
 }
@@ -152,50 +167,73 @@ bool ConcurrentTaskLimiter::Reservation::Contains(
 ConcurrentTaskLimiter::ConcurrentTaskLimiter(int32_t max_concurrent)
     : ConcurrentTaskLimiter(WithLimit(max_concurrent)) {}
 
-ConcurrentTaskLimiter::ConcurrentTaskLimiter(Options options)
-    : impl_(std::make_unique<Impl>(this, std::move(options))) {}
+ConcurrentTaskLimiter::ConcurrentTaskLimiter(Options options) {
+  const Status status = ValidateOptions(options);
+  if (!status.ok()) {
+    // Compatibility boundary for the original throwing constructor. Callers
+    // that handle configuration errors should use Create(), which validates
+    // before entering this path and returns Status directly.
+    throw std::invalid_argument(status.message());
+  }
+  impl_ = std::make_unique<Impl>(this, std::move(options));
+}
+
+Status ConcurrentTaskLimiter::ValidateOptions(const Options& options) {
+  if (options.max_concurrent <= 0) {
+    return InvalidArgumentError("max_concurrent must be positive");
+  }
+  if (options.worker_count < 0 ||
+      options.worker_count > options.max_concurrent) {
+    return InvalidArgumentError("worker_count must be in [1, max_concurrent]");
+  }
+  return OkStatus();
+}
 
 ConcurrentTaskLimiter::~ConcurrentTaskLimiter() {
-  if (IsSelfWait()) std::terminate();
+  if (IsSelfWait()) {
+    std::terminate();
+  }
   static_cast<void>(Shutdown());
 }
 
 Status ConcurrentTaskLimiter::TryAcquire() {
   bool closed;
   {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    closed = !impl_->accepting;
-    if (!closed &&
-        impl_->outstanding < static_cast<std::size_t>(impl_->max_concurrent)) {
-      ++impl_->outstanding;
+    std::lock_guard<std::mutex> lock(impl_->mutex_);
+    closed = !impl_->accepting_;
+    if (!closed && impl_->outstanding_ <
+                       static_cast<std::size_t>(impl_->max_concurrent_)) {
+      ++impl_->outstanding_;
       return OkStatus();
     }
   }
   // Error message construction can allocate; keep it outside the state lock.
-  if (closed) return FailedPreconditionError("Task limiter is closed");
+  if (closed) {
+    return FailedPreconditionError("Task limiter is closed");
+  }
   return ResourceExhaustedError("Maximum outstanding task limit (",
-                                impl_->max_concurrent, ") reached");
+                                impl_->max_concurrent_, ") reached");
 }
 
 void ConcurrentTaskLimiter::ReleaseReservation() noexcept {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
+  std::lock_guard<std::mutex> lock(impl_->mutex_);
   impl_->ReleaseSlot();
 }
 
 void ConcurrentTaskLimiter::Enqueue(
     std::unique_ptr<task_limiter_internal::Task> task) {
   {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    auto* tail = task.get();
-    if (impl_->tail) {
-      impl_->tail->next = std::move(task);
+    std::lock_guard<std::mutex> lock(impl_->mutex_);
+    auto* new_tail = task.get();
+    if (impl_->tail_) {
+      impl_->tail_->SetNext(std::move(task));
     } else {
-      impl_->head = std::move(task);
+      impl_->head_ = std::move(task);
     }
-    impl_->tail = tail;
-    ++impl_->queued;
+    impl_->tail_ = new_tail;
+    ++impl_->queued_;
   }
-  impl_->work_ready.notify_one();
+  impl_->work_ready_.notify_one();
 }
 
 bool ConcurrentTaskLimiter::IsSelfWait() const noexcept {
@@ -208,8 +246,8 @@ Status ConcurrentTaskLimiter::WaitIdle() {
   if (IsSelfWait()) {
     return FailedPreconditionError("Cannot wait from this executor's callback");
   }
-  std::unique_lock<std::mutex> lock(impl_->mutex);
-  impl_->idle.wait(lock, [this] { return impl_->outstanding == 0; });
+  std::unique_lock<std::mutex> lock(impl_->mutex_);
+  impl_->idle_.wait(lock, [this] { return impl_->outstanding_ == 0; });
   return OkStatus();
 }
 
@@ -218,9 +256,9 @@ Status ConcurrentTaskLimiter::WaitIdleUntil(
   if (IsSelfWait()) {
     return FailedPreconditionError("Cannot wait from this executor's callback");
   }
-  std::unique_lock<std::mutex> lock(impl_->mutex);
-  if (impl_->idle.wait_until(lock, deadline,
-                             [this] { return impl_->outstanding == 0; })) {
+  std::unique_lock<std::mutex> lock(impl_->mutex_);
+  if (impl_->idle_.wait_until(lock, deadline,
+                              [this] { return impl_->outstanding_ == 0; })) {
     return OkStatus();
   }
   lock.unlock();
@@ -228,24 +266,26 @@ Status ConcurrentTaskLimiter::WaitIdleUntil(
 }
 
 Status ConcurrentTaskLimiter::Shutdown() {
-  // Must precede join_mutex acquisition: an external joiner can already be
-  // waiting for this worker, and waiting on its mutex would deadlock.
+  // Must precede join_mutex_ acquisition: an external joiner can already be
+  // waiting for this worker, and waiting on its mutex_ would deadlock.
   if (IsSelfWait()) {
     return FailedPreconditionError(
         "Cannot shut down from this executor's callback");
   }
-  std::lock_guard<std::mutex> join_lock(impl_->join_mutex);
+  std::lock_guard<std::mutex> join_lock(impl_->join_mutex_);
   Close();
-  for (auto& worker : impl_->workers) {
-    if (worker.joinable()) worker.join();
+  for (auto& worker : impl_->workers_) {
+    if (worker.joinable()) {
+      worker.join();
+    }
   }
   return OkStatus();
 }
 
 ConcurrentTaskLimiter::Snapshot ConcurrentTaskLimiter::GetSnapshot() const {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
-  return {impl_->max_concurrent, impl_->worker_count, impl_->accepting,
-          impl_->outstanding,    impl_->queued,       impl_->running};
+  std::lock_guard<std::mutex> lock(impl_->mutex_);
+  return {impl_->max_concurrent_, impl_->worker_count_, impl_->accepting_,
+          impl_->outstanding_,    impl_->queued_,       impl_->running_};
 }
 
 }  // namespace talon

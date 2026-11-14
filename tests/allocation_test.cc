@@ -1,128 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-#include <cstdlib>
+#include <chrono>
+#include <future>
+#include <memory>
 #include <new>
+#include <utility>
 
-#include "talon/concurrent_task_limiter.h"
-#ifdef _MSC_VER
-#include <malloc.h>
-#endif
-
+#include "allocation_failure.h"
 #include "gtest/gtest.h"
-
-namespace {
-thread_local int allocations_before_failure = -1;
-thread_local bool allocation_failed = false;
-
-void CheckAllocation() {
-  if (allocations_before_failure < 0) return;
-  if (allocations_before_failure-- == 0) {
-    allocations_before_failure = -1;
-    allocation_failed = true;
-    throw std::bad_alloc();
-  }
-}
-
-class FailAllocation {
- public:
-  explicit FailAllocation(int index) {
-    allocation_failed = false;
-    allocations_before_failure = index;
-  }
-  ~FailAllocation() { allocations_before_failure = -1; }
-  FailAllocation(const FailAllocation&) = delete;
-  FailAllocation& operator=(const FailAllocation&) = delete;
-};
-}  // namespace
-
-// One-shot, submitting-thread-only injection. Worker/test framework allocations
-// are unaffected; no assertions run while the injection is armed.
-void* operator new(std::size_t size) {
-  CheckAllocation();
-  if (void* memory = std::malloc(size == 0 ? 1 : size)) return memory;
-  throw std::bad_alloc();
-}
-void* operator new[](std::size_t size) { return ::operator new(size); }
-void operator delete(void* pointer) noexcept { std::free(pointer); }
-void operator delete[](void* pointer) noexcept { std::free(pointer); }
-void operator delete(void* pointer, std::size_t) noexcept {
-  std::free(pointer);
-}
-void operator delete[](void* pointer, std::size_t) noexcept {
-  std::free(pointer);
-}
-void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
-  try {
-    return ::operator new(size);
-  } catch (...) {
-    return nullptr;
-  }
-}
-void* operator new[](std::size_t size, const std::nothrow_t& tag) noexcept {
-  return ::operator new(size, tag);
-}
-void operator delete(void* pointer, const std::nothrow_t&) noexcept {
-  std::free(pointer);
-}
-void operator delete[](void* pointer, const std::nothrow_t&) noexcept {
-  std::free(pointer);
-}
-
-void* operator new(std::size_t size, std::align_val_t alignment) {
-  CheckAllocation();
-  const auto align = static_cast<std::size_t>(alignment);
-#ifdef _MSC_VER
-  if (void* memory = _aligned_malloc(size == 0 ? 1 : size, align))
-    return memory;
-#else
-  void* memory = nullptr;
-  if (posix_memalign(&memory, align, size == 0 ? 1 : size) == 0) return memory;
-#endif
-  throw std::bad_alloc();
-}
-void* operator new[](std::size_t size, std::align_val_t alignment) {
-  return ::operator new(size, alignment);
-}
-void operator delete(void* pointer, std::align_val_t) noexcept {
-#ifdef _MSC_VER
-  _aligned_free(pointer);
-#else
-  std::free(pointer);
-#endif
-}
-void operator delete[](void* pointer, std::align_val_t alignment) noexcept {
-  ::operator delete(pointer, alignment);
-}
-void operator delete(void* pointer, std::size_t,
-                     std::align_val_t alignment) noexcept {
-  ::operator delete(pointer, alignment);
-}
-void operator delete[](void* pointer, std::size_t,
-                       std::align_val_t alignment) noexcept {
-  ::operator delete(pointer, alignment);
-}
-void* operator new(std::size_t size, std::align_val_t alignment,
-                   const std::nothrow_t&) noexcept {
-  try {
-    return ::operator new(size, alignment);
-  } catch (...) {
-    return nullptr;
-  }
-}
-void* operator new[](std::size_t size, std::align_val_t alignment,
-                     const std::nothrow_t& tag) noexcept {
-  return ::operator new(size, alignment, tag);
-}
-void operator delete(void* pointer, std::align_val_t alignment,
-                     const std::nothrow_t&) noexcept {
-  ::operator delete(pointer, alignment);
-}
-void operator delete[](void* pointer, std::align_val_t alignment,
-                       const std::nothrow_t&) noexcept {
-  ::operator delete(pointer, alignment);
-}
+#include "talon/concurrent_task_limiter.h"
+#include "test_support.h"
 
 namespace {
 using talon::ConcurrentTaskLimiter;
+using talon_test::FailAllocation;
 
 TEST(Allocation, SuccessfulScheduleAllocatesExactlyOneNode) {
   ConcurrentTaskLimiter limiter(1);
@@ -131,10 +21,10 @@ TEST(Allocation, SuccessfulScheduleAllocatesExactlyOneNode) {
   {
     FailAllocation fail(1);
     accepted = limiter.Schedule([] {}).ok();
-    remaining = allocations_before_failure;
+    remaining = FailAllocation::Remaining();
   }
   EXPECT_TRUE(accepted);
-  EXPECT_FALSE(allocation_failed);
+  EXPECT_FALSE(FailAllocation::Failed());
   EXPECT_EQ(remaining, 0);
   EXPECT_TRUE(limiter.WaitIdle().ok());
 }
@@ -151,7 +41,7 @@ TEST(Allocation, TaskNodeFailureReturnsReservation) {
     }
   }
   EXPECT_TRUE(caught);
-  EXPECT_TRUE(allocation_failed);
+  EXPECT_TRUE(FailAllocation::Failed());
   EXPECT_EQ(limiter.GetSnapshot().outstanding, 0U);
   EXPECT_TRUE(limiter.Schedule([] {}).ok());
   EXPECT_TRUE(limiter.WaitIdle().ok());
@@ -168,7 +58,9 @@ TEST(Allocation, EveryFutureConstructionAllocationRollsBack) {
       FailAllocation fail(allocation);
       try {
         auto result = limiter.Submit([] { return 42; });
-        if (result.ok()) future = std::move(*result);
+        if (result.ok()) {
+          future = std::move(*result);
+        }
       } catch (const std::bad_alloc&) {
         caught = true;
       }
@@ -176,7 +68,7 @@ TEST(Allocation, EveryFutureConstructionAllocationRollsBack) {
     EXPECT_TRUE(limiter.WaitIdle().ok());
     EXPECT_EQ(limiter.GetSnapshot().outstanding, 0U);
     if (caught) {
-      EXPECT_TRUE(allocation_failed);
+      EXPECT_TRUE(FailAllocation::Failed());
       ++failures;
     } else {
       ASSERT_TRUE(future.valid());
@@ -203,7 +95,7 @@ TEST(Allocation, ConstructorFailureJoinsPartiallyStartedWorkers) {
       }
     }
     if (caught) {
-      EXPECT_TRUE(allocation_failed);
+      EXPECT_TRUE(FailAllocation::Failed());
       ++failures;
     } else {
       reached_success = true;
@@ -223,6 +115,146 @@ TEST(Allocation, FactoryMapsAllocationFailureToResourceExhausted) {
     code = result.status().code();
   }
   EXPECT_EQ(code, talon::StatusCode::kResourceExhausted);
-  EXPECT_TRUE(allocation_failed);
+  EXPECT_TRUE(FailAllocation::Failed());
+}
+
+TEST(Allocation, InvalidOptionsDoNotAllocateAnExecutorOrThrowInternally) {
+  ConcurrentTaskLimiter::Options options;
+  options.max_concurrent = 0;
+  talon::StatusCode code = talon::StatusCode::kOk;
+  {
+    // The pinned status implementation allocates its diagnostic once. There
+    // must be no executor allocation before validating the invalid options.
+    FailAllocation fail(1);
+    code = ConcurrentTaskLimiter::Create(options).status().code();
+  }
+  EXPECT_EQ(code, talon::StatusCode::kInvalidArgument);
+  EXPECT_FALSE(FailAllocation::Failed());
+}
+
+TEST(Allocation, EveryFutureFailureDestroysCapturesEvenWithRetainedFuture) {
+  ConcurrentTaskLimiter limiter(1);
+  int failures = 0;
+  bool succeeded = false;
+  for (int allocation = 0; allocation < 16; ++allocation) {
+    std::weak_ptr<int> weak;
+    std::future<int> future;
+    bool caught = false;
+    {
+      auto owner = std::make_shared<int>(42);
+      weak = owner;
+      auto callable = [owner = std::move(owner)] { return *owner; };
+      FailAllocation fail(allocation);
+      try {
+        auto result = limiter.Submit(std::move(callable));
+        if (result.ok()) {
+          future = std::move(*result);
+        }
+      } catch (const std::bad_alloc&) {
+        caught = true;
+      }
+    }
+    EXPECT_TRUE(limiter.WaitIdle().ok());
+    EXPECT_TRUE(weak.expired()) << "allocation=" << allocation;
+    EXPECT_EQ(limiter.GetSnapshot().outstanding, 0U);
+    if (caught) {
+      ++failures;
+    } else {
+      ASSERT_TRUE(future.valid());
+      EXPECT_EQ(future.get(), 42);
+      succeeded = true;
+      break;
+    }
+  }
+  EXPECT_GE(failures, 2);
+  EXPECT_TRUE(succeeded);
+}
+
+TEST(Allocation, OverAlignedTaskAllocationFailurePreservesCallerOwnership) {
+  class alignas(512) Callable {
+   public:
+    explicit Callable(std::unique_ptr<int> value) : value_(std::move(value)) {}
+    Callable(Callable&&) = default;
+    void operator()() {}
+    bool has_value() const { return value_ != nullptr; }
+
+   private:
+    std::unique_ptr<int> value_;
+  } callable(std::make_unique<int>(42));
+  ConcurrentTaskLimiter limiter(1);
+  bool caught = false;
+  {
+    FailAllocation fail(0);
+    try {
+      static_cast<void>(limiter.Schedule(std::move(callable)));
+    } catch (const std::bad_alloc&) {
+      caught = true;
+    }
+  }
+  EXPECT_TRUE(caught);
+  EXPECT_TRUE(callable.has_value());
+  EXPECT_EQ(limiter.GetSnapshot().outstanding, 0U);
+}
+
+TEST(Allocation, RollbackDoesNotReleaseAnotherRunningTasksReservation) {
+  talon_test::Gate release;
+  ConcurrentTaskLimiter limiter(2);
+  talon_test::OpenOnExit cleanup(release);
+  ASSERT_TRUE(limiter.Schedule([&] { release.Wait(); }).ok());
+  bool caught = false;
+  {
+    FailAllocation fail(0);
+    try {
+      static_cast<void>(limiter.Submit([] { return 42; }));
+    } catch (const std::bad_alloc&) {
+      caught = true;
+    }
+  }
+  EXPECT_TRUE(caught);
+  EXPECT_EQ(limiter.GetSnapshot().outstanding, 1U);
+  EXPECT_EQ(limiter.WaitIdleUntil(std::chrono::steady_clock::now()).code(),
+            talon::StatusCode::kDeadlineExceeded);
+  release.Open();
+  EXPECT_TRUE(limiter.WaitIdle().ok());
+}
+
+TEST(Allocation, RejectionDiagnosticFailureDoesNotMoveArgumentsOrChangeCount) {
+  talon_test::Gate release;
+  ConcurrentTaskLimiter limiter(1);
+  talon_test::OpenOnExit cleanup(release);
+  ASSERT_TRUE(limiter.Schedule([&] { release.Wait(); }).ok());
+  auto argument = std::make_unique<int>(42);
+  talon::StatusCode code = talon::StatusCode::kOk;
+  bool caught = false;
+  {
+    FailAllocation fail(0);
+    try {
+      code = limiter.Schedule([](std::unique_ptr<int>) {}, std::move(argument))
+                 .code();
+    } catch (const std::bad_alloc&) {
+      caught = true;
+    }
+  }
+  EXPECT_TRUE(caught || code == talon::StatusCode::kResourceExhausted);
+  EXPECT_NE(argument, nullptr);
+  EXPECT_EQ(limiter.GetSnapshot().outstanding, 1U);
+}
+
+TEST(Allocation, PersistentFailureWhileConstructingErrorLeavesNoExecutor) {
+  bool caught = false;
+  {
+    FailAllocation fail(0, true);
+    try {
+      static_cast<void>(
+          ConcurrentTaskLimiter::Create(ConcurrentTaskLimiter::Options()));
+    } catch (const std::bad_alloc&) {
+      caught = true;
+    }
+  }
+  EXPECT_TRUE(caught);
+  auto recovered =
+      ConcurrentTaskLimiter::Create(ConcurrentTaskLimiter::Options());
+  ASSERT_TRUE(recovered.ok());
+  EXPECT_TRUE((*recovered)->Shutdown().ok());
 }
 }  // namespace

@@ -24,6 +24,36 @@ static_assert(!std::is_copy_assignable_v<ConcurrentTaskLimiter>);
 static_assert(!std::is_move_assignable_v<ConcurrentTaskLimiter>);
 static_assert(std::is_nothrow_destructible_v<ConcurrentTaskLimiter>);
 
+TEST(Validation, RejectsNullFunctionPointerBeforeDispatch) {
+  ConcurrentTaskLimiter limiter(1);
+  void (*function)() = nullptr;
+  EXPECT_EQ(limiter.Schedule(function).code(), StatusCode::kInvalidArgument);
+  EXPECT_TRUE(limiter.WaitIdle().ok());
+  EXPECT_EQ(limiter.GetSnapshot().outstanding, 0U);
+}
+
+TEST(Validation, RejectsNullMemberFunctionPointerBeforeDispatch) {
+  struct Object {
+    void Run() {}
+  } object;
+  void (Object::*function)() = nullptr;
+  ConcurrentTaskLimiter limiter(1);
+  auto result = limiter.Submit(function, &object);
+  EXPECT_EQ(result.status().code(), StatusCode::kInvalidArgument);
+  EXPECT_TRUE(limiter.WaitIdle().ok());
+}
+
+TEST(Validation, RejectsNullMemberDataPointerBeforeDispatch) {
+  struct Object {
+    int value = 42;
+  } object;
+  int Object::*member = nullptr;
+  ConcurrentTaskLimiter limiter(1);
+  auto result = limiter.Submit(member, std::ref(object));
+  EXPECT_EQ(result.status().code(), StatusCode::kInvalidArgument);
+  EXPECT_TRUE(limiter.WaitIdle().ok());
+}
+
 TEST(Configuration, RejectsNonPositiveLimits) {
   for (int32_t limit : {0, -1, std::numeric_limits<int32_t>::min()}) {
     EXPECT_THROW(ConcurrentTaskLimiter limiter(limit), std::invalid_argument);
@@ -99,13 +129,17 @@ TEST(Schedule, DiscardsReturnValueAndDestroysIt) {
   EXPECT_TRUE(weak.expired());
 }
 
-struct MoveOnlyCallable {
+class MoveOnlyCallable {
+ public:
   explicit MoveOnlyCallable(std::unique_ptr<int> value)
-      : value(std::move(value)) {}
+      : value_(std::move(value)) {}
   MoveOnlyCallable(MoveOnlyCallable&&) = default;
   MoveOnlyCallable(const MoveOnlyCallable&) = delete;
-  int operator()(std::unique_ptr<int> other) && { return *value + *other; }
-  std::unique_ptr<int> value;
+  int operator()(std::unique_ptr<int> other) && { return *value_ + *other; }
+  bool has_value() const { return value_ != nullptr; }
+
+ private:
+  std::unique_ptr<int> value_;
 };
 
 TEST(Submission, MoveOnlyRvalueCallableAndArgument) {
@@ -141,7 +175,8 @@ TEST(Submission, MutableLambdaAndDecayedCopy) {
 }
 
 TEST(Submission, ExplicitReferenceAndLvalueOnlyCallable) {
-  struct LvalueOnly {
+  class LvalueOnly {
+   public:
     void operator()(int& value) & { ++value; }
   } callable;
   ConcurrentTaskLimiter limiter(1);
@@ -235,8 +270,12 @@ TEST(Submission, StandardAndNonStandardExceptionsReachFuture) {
   ConcurrentTaskLimiter limiter(1);
   for (int kind = 0; kind < 3; ++kind) {
     auto result = limiter.Submit([kind]() -> int {
-      if (kind == 0) throw std::runtime_error("task failure");
-      if (kind == 1) throw 17;
+      if (kind == 0) {
+        throw std::runtime_error("task failure");
+      }
+      if (kind == 1) {
+        throw 17;
+      }
       throw std::bad_alloc();
     });
     ASSERT_TRUE(result.ok());
@@ -262,7 +301,8 @@ TEST(Submission, EmptyFunctionReportsBadFunctionCall) {
 }
 
 TEST(Submission, ThrowingResultMoveReachesFuture) {
-  struct Result {
+  class Result {
+   public:
     Result() = default;
     Result(const Result&) = delete;
     Result(Result&&) { throw std::runtime_error("result move"); }
@@ -283,11 +323,11 @@ TEST(Admission, FullDoesNotMoveCallableOrArguments) {
   auto argument = std::make_unique<int>(22);
   auto result = limiter.Submit(std::move(callable), std::move(argument));
   EXPECT_EQ(result.status().code(), StatusCode::kResourceExhausted);
-  EXPECT_NE(callable.value, nullptr);
+  EXPECT_TRUE(callable.has_value());
   EXPECT_NE(argument, nullptr);
   auto status = limiter.Schedule(std::move(callable), std::move(argument));
   EXPECT_EQ(status.code(), StatusCode::kResourceExhausted);
-  EXPECT_NE(callable.value, nullptr);
+  EXPECT_TRUE(callable.has_value());
   EXPECT_NE(argument, nullptr);
 }
 
@@ -304,14 +344,19 @@ TEST(Admission, ClosedTakesPrecedenceOverFullAndPreservesArguments) {
   EXPECT_EQ(limiter.Schedule([] {}).code(), StatusCode::kFailedPrecondition);
 }
 
-struct ThrowOnCapture {
-  explicit ThrowOnCapture(bool move_fails = false) : move_fails(move_fails) {}
+class ThrowOnCapture {
+ public:
+  explicit ThrowOnCapture(bool move_fails = false) : move_fails_(move_fails) {}
   ThrowOnCapture(const ThrowOnCapture&) { throw std::runtime_error("copy"); }
-  ThrowOnCapture(ThrowOnCapture&& other) : move_fails(other.move_fails) {
-    if (move_fails) throw std::runtime_error("move");
+  ThrowOnCapture(ThrowOnCapture&& other) : move_fails_(other.move_fails_) {
+    if (move_fails_) {
+      throw std::runtime_error("move");
+    }
   }
   void operator()() {}
-  bool move_fails;
+
+ private:
+  bool move_fails_;
 };
 
 TEST(Admission, ThrowingCallableCopyAndMoveRollBack) {
@@ -363,7 +408,8 @@ TEST(Submission, OverAlignedCallableAndArgument) {
   struct alignas(256) Argument {
     int value = 42;
   };
-  struct alignas(256) Callable {
+  class alignas(256) Callable {
+   public:
     int operator()(Argument&& argument) && {
       EXPECT_EQ(reinterpret_cast<std::uintptr_t>(this) % alignof(Callable), 0U);
       EXPECT_EQ(reinterpret_cast<std::uintptr_t>(&argument) % alignof(Argument),

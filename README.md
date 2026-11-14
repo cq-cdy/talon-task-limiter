@@ -86,7 +86,11 @@ target_link_libraries(my_app PRIVATE talon::task_limiter)
 
 满载返回 `ResourceExhausted`；关闭返回 `FailedPrecondition`，关闭优先于满载。被拒绝时不复制或移动 callable/参数。这里的“立即”指不等待空闲额度；接口会竞争互斥锁，**不是 lock-free / wait-free，也不提供实时或公平性保证**。
 
+成功取得额度后，空原始函数指针、成员指针以及空的原始/标准智能成员目标会返回 `InvalidArgument`，不会发布任务。自定义间接访问对象和借用引用仍须由调用者保证有效。future 的值结果要求可移动构造且析构不抛异常；void 和左值引用结果也受支持。
+
 `Schedule` / `Submit` 中的任务分配、参数复制或移动异常原样传播，额度自动回滚。Status 的错误消息也可能分配内存，所以这些 API 不是完整内存耗尽场景下的 `noexcept` 接口。
+
+构造阶段异常不承诺恢复已经移动的输入。拒绝时不移动的保证从函数入口开始，不覆盖调用表达式求值时已经发生的操作；需要重试 move-only 工作时，应像压力测试那样先保存具名 callable，再尝试提交。
 
 ### 异步异常
 
@@ -103,9 +107,10 @@ options.on_unhandled_exception = [](std::exception_ptr error) noexcept {
 ### 生命周期与死锁边界
 
 - 额度从接纳时开始，覆盖构造、排队、执行、异常回调及任务捕获对象析构。`future` 就绪可能早于额度释放；需要完整完成屏障时使用 `WaitIdle` 或 `Shutdown`。
-- 参数遵循类似 `std::thread` 的 decay-copy、一次性右值调用规则；`std::ref` / `std::cref` 显式借用对象，借用对象必须活到任务及相关清理结束。返回的引用必须指向寿命足够长的外部对象。
+- 参数遵循类似 `std::thread` 的 decay-copy、一次性右值调用规则；`std::ref` / `std::cref` 显式借用对象，借用对象必须活到任务及相关清理结束。返回的引用、view 或指针必须指向寿命足够长的外部对象，不能指向随任务清理的捕获对象。
 - 所有常规接口可并发调用。外部所有者必须确保对象在调用期间有效，并在析构前结束所有外部调用；析构会排空内部任务。内部任务禁止销毁所属执行器，否则立即终止进程。
 - 当前执行器的任务、异常处理器、捕获对象构造/析构回调调用其 `WaitIdle` / `Shutdown`，返回 `FailedPrecondition`，不改变接纳状态；调用 `Close` 和尝试 `Schedule` 是允许的。
+- worker 的 `thread_local` 析构也受自等待保护；`Shutdown` 会等待线程退出清理，`WaitIdle` 只等待任务清理。用户保存到 TLS 中的引用必须保持相应寿命。
 - 库不解析跨执行器或用户 future 的等待依赖。例如仅一个 worker 的任务等待该池另一个任务的 future，仍可能死锁。任务必须最终返回；没有强行终止线程、超时析构或抢占取消。
 
 更精确的状态机、同步和关闭竞争解释见 [docs/design.md](docs/design.md)。
@@ -119,14 +124,23 @@ cmake --preset asan -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON
 cmake --build --preset asan --parallel 4
 ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 ctest --preset asan
 
-cmake --preset tsan -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON
-cmake --build --preset tsan --parallel 4
-TSAN_OPTIONS=halt_on_error=1 ctest --preset tsan
+# 完整 TSan（需要 clang-12/clang++-12；只安装到本地 build-toolchain）：
+python3 tools/build_tsan_runtime.py --jobs 4
+runtime_prefix="$PWD/build-toolchain/tsan-runtime"
+cmake -S . -B build-tsan-full -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_COMPILER=clang++-12 -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON \
+  "-DCMAKE_CXX_FLAGS=-stdlib=libc++ -fsanitize=thread -fno-omit-frame-pointer -isystem $runtime_prefix/include/c++/v1" \
+  "-DCMAKE_EXE_LINKER_FLAGS=-L $runtime_prefix/lib -Wl,-rpath,$runtime_prefix/lib" \
+  -DTALON_TASK_LIMITER_SANITIZER=thread
+cmake --build build-tsan-full --parallel 4
+TSAN_OPTIONS=halt_on_error=1 ctest --test-dir build-tsan-full --output-on-failure
 ```
 
-Sanitizer 构建不运行自定义 allocator / pthread interposition 测试，避免拦截机制冲突；这些测试在普通构建中单独运行。所有配置的实际执行状态、工具链和限制见 [docs/verification.md](docs/verification.md)。CI 配置本身不代表远端流水线已运行。
+Sanitizer 构建不运行自定义 allocator / pthread interposition 测试，避免拦截机制冲突；这些测试在普通构建中单独运行。完整 sanitizer 配置仍验证安装消费。所有配置的实际执行状态、工具链和限制见 [docs/verification.md](docs/verification.md)。CI 配置本身不代表远端流水线已运行。
 
-本机 GCC/Clang + libstdc++ 的 TSan 在 `std::call_once` 异常展开后存在可独立复现的超时；**完整 TSan 验证使用 Clang + libc++，72/72 通过**。遇到同样问题时，按验证记录选择相应工具链，不要跳过异常测试。
+本机 libstdc++ 的 TSan 在 `std::call_once` 异常展开后存在独立复现的超时；未插桩 libc++ 又会漏掉 future 引用计数同步，产生可独立复现的报告。完整检查使用插桩后的 libc++/libc++abi，不添加 suppression 或跳过异常测试。
+
+Google 格式与花括号检查：`python3 tools/check_style.py --build-dir build-debug`，配置时需开启 `CMAKE_EXPORT_COMPILE_COMMANDS`。异常边界和 C++17 兼容选择见 [风格说明](docs/style.md)，本轮确认并修复的问题见 [整体审查](docs/review.md)。
 
 普通 `Schedule` 每个成功任务分配一个节点，发布队列不再分配；用户 callable 本身仍可能分配。`Submit` 另需 future 共享状态。线程复用、队列操作 O(1)，用户代码在状态锁外执行。吞吐基准及其适用范围见 [docs/performance.md](docs/performance.md)，不把 CAS 或微基准数字当作整体性能保证。
 

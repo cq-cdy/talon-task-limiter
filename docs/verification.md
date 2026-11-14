@@ -1,66 +1,48 @@
-# 验证记录
+# 验证记录（整体审查后）
 
-执行日期：2026-11-15（Asia/Shanghai）。本记录描述当前交付代码实际执行的本地验证，不代表形式化正确性证明或所有操作系统的验证结果。
+执行日期：2026-11-15，Linux x86_64 / WSL2，CMake 3.26.5。初版 `31e876d` 的记录保留在 [verification-initial.md](verification-initial.md)；本文件对应本次修复和扩展测试。
 
-## 环境与范围
+## 实际结果
 
-- Ubuntu 22.04 用户空间，WSL2 Linux `5.15.167.4-microsoft-standard-WSL2`，x86_64，12 个逻辑 CPU。
-- CMake 3.26.5，GNU Make；GCC 11.4.0 / 12.3.0，Clang 12.0.1。
-- talon-status 固定提交 `aaf333da1e5c9f494d5750f52fd0838aeb4e4205`；GoogleTest 固定提交 `f8d7d77c06936315286eb55f8de22cd23c188571`。
-- 普通构建和 ASan 使用 libstdc++；完整 TSan 验证使用本地解压的 libc++ 12.0.1。
-- 所有本库 targets 启用 `-Wall -Wextra -Wpedantic -Werror`；没有删除测试或减弱异常路径断言。Release 使用常规 `-DNDEBUG`，GoogleTest 断言仍然执行。
-
-原输入只有类声明、模板提交和 CAS 片段，缺少 ThreadPool、构造/析构及构建配置，没有可直接运行的旧版基线。新仓库按明确的容量、关闭、异常和生命周期契约建立行为测试；性能数据是初始基线，不是“优化前后”的比较。
-
-## 结果
-
-| 验证 | 状态 | 实际结果 |
+| 检查 | 状态 | 结果 |
 | --- | --- | --- |
-| GCC 11 Debug 静态库 | **Passed** | 80/80 CTest，通过 |
-| GCC 12 Release 静态库 | **Passed** | 80/80 CTest，通过 |
-| GCC 12 Release 共享库 | **Passed** | 80/80 CTest，通过 |
-| Clang 12 ASan + UBSan + leak detection | **Passed** | 72/72 CTest，通过 |
-| GCC 12 TSan + libstdc++ | **Failed / Blocked by environment** | 71/72 通过；返回值移动抛异常测试 90 秒超时，已由无本库依赖的程序复现 |
-| Clang 12 TSan + libc++ 12 | **Passed** | 完整 72/72 CTest 通过，包括同一个抛异常测试 |
-| Release 打乱顺序重复运行 | **Passed** | 70 个核心测试 × 30 轮，2,100 次测试执行通过 |
-| 迁移安装目录、find_package、add_subdirectory 外部消费 | **Passed** | 静态/共享构建均通过；最后修改集成测试参数传递后再次分别验证通过 |
-| C++23 消费 C++17 共享库 | **Passed** | GCC 12 配置、编译及运行外部消费端成功 |
-| 非法 API 用法的编译诊断 | **Passed** | 5 个预期编译失败；先验证正向基线，再检查失败诊断内容 |
-| 吞吐基准 | **Passed** | 4 组负载，每组预热 + 5 次测量；全部完成数正确，原始 CSV 已保存 |
-| Windows / macOS | **Not executed** | 当前环境仅 Linux；已提供 CI 配置，远端流水线尚未执行 |
-| 长时间浸泡、生产业务负载、跨 CRT/任意 ABI 组合 | **Not executed** | 不在本次运行覆盖范围；应在实际部署环境追加验证 |
+| GCC 11 Debug 静态库 | Passed | 233/233；分配注入拆分后，受影响的 11 项另外重跑通过 |
+| GCC 12 Release 静态库 | Passed | 233/233 |
+| GCC 12 Release 共享库 | Passed | 233/233 |
+| Clang 12 ASan + UBSan + leak detection | Passed | 207/207，含安装消费与 sanitizer 运行库传递 |
+| Clang 12 TSan，完整插桩 libc++/libc++abi/GTest | Passed | 207/207，无 suppression，无跳过异常路径 |
+| TSan 生命周期重点回归重复 | Passed | 原先涉及的两项及 TLS 自等待回归，各连续 20 次通过 |
+| Release 核心测试打乱顺序重复 | Passed | 203 项 × 30 轮 = 6,090 次测试执行 |
+| C++23 外部消费 C++17 共享库 | Passed | 正向配置、编译、运行和 16 个负向编译检查 |
+| 安装测试脚本的清理保护 | Passed | 受控哨兵证明错误参数不再先删除目录；无参数调用也提前失败 |
+| Google 格式 / 花括号 | Static check only | 39 个 C++ 文件格式通过；19 个正常编译的 TU 通过 Google/brace 检查 |
+| 生产核心高级静态分析 | Static check only | `src/concurrent_task_limiter.cc` 及对应项目头通过选定的 bugprone / Clang Analyzer 检查 |
+| Windows / macOS / 远端 CI | Not executed | 已提供配置，当前环境没有执行这些平台 |
+| LLVM 自身完整测试套件 | Not executed | 这里只构建测试工具链，并以独立 probe 和本项目测试验证所需路径 |
 
-80 项 CTest = 70 项核心测试 + 5 项分配测试 + 2 项 Linux 线程创建失败测试 + 头文件/多 TU + 包消费 + 示例。5 项编译失败检查嵌套在包消费测试内，未重复计入 80。Sanitizer 配置保留全部 70 项核心测试，只隔离 allocator / pthread interposition 以及非 sanitizer 的安装消费测试，因此共 72 项。
+233 = 203 项核心测试 + 11 项分配故障 + 16 项 Linux 线程启动测试 + 头文件/多 TU + 安装消费 + 示例。Sanitizer 配置保留全部 203 核心项，隔离自定义 allocator / pthread interposition，另运行头文件、裸 sanitizer 消费端、安装消费和示例，共 207 项。16 个编译失败检查包含在安装消费测试内，不重复计数。
 
-## 主要命令
+单次大负载测试包含 262,144 个任务；30 轮仅这一项就核对了 7,864,320 次执行和对应资源释放。还包含 288 个并发历史、48 组构造/回滚矩阵、128 层嵌套以及跨池任务树，详见 [review.md](review.md)。没有禁用原有断言或删除关键路径测试。
 
-所有命令在仓库根目录运行。后续构建通过 FetchContent 的标准源码覆盖变量复用首次拉取的固定版本，不使用用户已有的兄弟仓库：
+## 常规构建与运行
+
+沿用初版记录中的固定依赖源码缓存。以下是本次实际使用的配置/命令组合；所有目录都在仓库内。
 
 ```sh
-cmake -S . -B build-bootstrap -DCMAKE_BUILD_TYPE=Debug \
-  -DTALON_TASK_LIMITER_BUILD_TESTS=OFF
-cmake --build build-bootstrap --parallel 4
-
-# 初次 build-debug 自动下载固定 GoogleTest；后续目录可复用它。
 cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON \
-  -DFETCHCONTENT_SOURCE_DIR_TALON_STATUS="$PWD/build-bootstrap/_deps/talon_status-src"
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON
 cmake --build build-debug --parallel 4
 ctest --test-dir build-debug --output-on-failure --parallel 4
 
 cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_CXX_COMPILER=g++-12 -DTALON_TASK_LIMITER_BUILD_BENCHMARKS=ON \
-  -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON \
-  -DFETCHCONTENT_SOURCE_DIR_TALON_STATUS="$PWD/build-bootstrap/_deps/talon_status-src" \
-  -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST="$PWD/build-debug/_deps/googletest-src"
-cmake --build build-release --parallel 4
+  -DCMAKE_CXX_COMPILER=g++-12 -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON \
+  -DTALON_TASK_LIMITER_BUILD_BENCHMARKS=ON
+cmake --build build-release --parallel 3
 ctest --test-dir build-release --output-on-failure --parallel 4
 
 cmake -S . -B build-shared -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CXX_COMPILER=g++-12 -DBUILD_SHARED_LIBS=ON \
-  -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON \
-  -DFETCHCONTENT_SOURCE_DIR_TALON_STATUS="$PWD/build-bootstrap/_deps/talon_status-src" \
-  -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST="$PWD/build-debug/_deps/googletest-src"
+  -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON
 cmake --build build-shared --parallel 3
 ctest --test-dir build-shared --output-on-failure --parallel 4
 
@@ -68,98 +50,69 @@ build-release/talon_task_limiter_test --gtest_repeat=30 --gtest_shuffle \
   --gtest_random_seed=43189 --gtest_brief=1
 ```
 
-ASan/UBSan：
+ASan/UBSan 使用 Clang 12，`TALON_TASK_LIMITER_SANITIZER=address`：
 
 ```sh
-cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_CXX_COMPILER=clang++-12 -DTALON_TASK_LIMITER_SANITIZER=address \
-  -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON \
-  -DFETCHCONTENT_SOURCE_DIR_TALON_STATUS="$PWD/build-bootstrap/_deps/talon_status-src" \
-  -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST="$PWD/build-debug/_deps/googletest-src"
-cmake --build build-asan --parallel 3
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   ctest --test-dir build-asan --output-on-failure --parallel 2
 ```
 
-C++23 安装消费（前置条件：build-shared 的 package 测试已成功生成 relocated 安装）：
+安装消费测试会迁移安装前缀，再配置独立消费工程；路径列表包含带空格的额外目录。负向编译检查先证明正常源码可以编译链接，然后要求每个非法用例失败且匹配预期诊断。
+
+## TSan 的完整工具链验证
+
+初版使用未插桩的发行版 libc++，72 项测试曾通过。本次扩大覆盖后，实际有两项报告 future 共享状态释放与 `pthread_cond_wait` 的访问缺少同步：旧配置 **205/207 通过、2 项失败**。这些失败记录保留，没有用重跑直到通过替代调查。
+
+独立的 [future_lifetime.cc](../tests/toolchain/future_lifetime.cc) 只使用标准 promise/future/thread，不包含本库、GTest、自定义 allocator 或额外同步。相同未插桩 libc++ 配置下，它以 TSan 错误退出码 66 复现同样报告。检查 libc++ 源码可见共享计数的原子递减位于未插桩的库实现内；结合独立复现，定位为 TSan 看不到该同步关系。
+
+随后按 [LLVM 12 构建机制](https://releases.llvm.org/12.0.1/projects/libcxx/docs/BuildingLibcxx.html) 在本地编译 libc++ 和 libc++abi，均启用 `-fsanitize=thread`。GTest 和项目代码同样插桩。独立 probe 的 2,000 轮通过，完整项目 207/207 通过。没有给库或测试增加延迟、额外等待或 sanitizer suppression。
 
 ```sh
-cmake -S tests/consumer -B build-cxx23 -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_CXX_COMPILER=g++-12 -DCMAKE_CXX_STANDARD=23 \
-  -DCMAKE_PREFIX_PATH="$PWD/build-shared/package-check/relocated" \
-  -DCHECK_COMPILE_FAILURES=ON
-cmake --build build-cxx23 --parallel 2
-ctest --test-dir build-cxx23 --output-on-failure
-```
-
-## TSan 超时的独立定位与完整替代验证
-
-GCC 12 TSan 完整运行时，唯一超时是 `Submission.ThrowingResultMoveReachesFuture`。GDB 显示 worker 停在：
-
-```text
-__sanitizer::FutexWait
-guard_acquire
-__interceptor_pthread_once
-std::call_once
-std::__future_base::_State_baseV2::_M_set_result
-std::promise<Result>::set_exception
-FutureTask::Run
-```
-
-同一个 promise 的 `set_value` 因结果移动抛异常后，`set_exception` 再进入其 once 状态时卡住。独立程序 [tests/toolchain/once_exception.cc](../tests/toolchain/once_exception.cc) 只有两个针对同一 once_flag 的 `std::call_once` 调用，第一次抛异常；不引用本库、GoogleTest 或 future：
-
-```sh
-g++-12 -std=c++17 -pthread tests/toolchain/once_exception.cc -o build-tsan/once_plain
-timeout 5s build-tsan/once_plain                 # 实测退出 0
-
-g++-12 -std=c++17 -g -fsanitize=thread -pthread \
-  tests/toolchain/once_exception.cc -o build-tsan/once_gcc
-timeout 5s build-tsan/once_gcc                   # 实测退出 124：超时
-
-clang++-12 -std=c++17 -g -fsanitize=thread -pthread \
-  tests/toolchain/once_exception.cc -o build-tsan/once_clang
-timeout 5s build-tsan/once_clang                 # libstdc++ 配置同样退出 124
-```
-
-因此这里有直接证据将该配置的失败定位到 TSan/标准库异常展开交互，而不是通过推测归咎环境。上游 [TSan C++ 手册](https://github.com/google/sanitizers/wiki/ThreadSanitizerCppManual#faq) 也记录了 C++ 异常支持的限制。没有修改执行器异常语义，没有 skip 或 suppress 该测试。
-
-为完成全部路径的 TSan 检查，仅下载 Ubuntu jammy 的以下六个包并解压到构建目录，没有安装或修改系统包：`libc++-12-dev`、`libc++1-12`、`libc++abi-12-dev`、`libc++abi1-12`、`libunwind-12-dev`、`libunwind-12`，全部版本为 `1:12.0.1-19ubuntu3`。它们是本地验证工具，不是本库运行依赖。
-
-```sh
-mkdir -p build-toolchain/debs
-# 在 build-toolchain/debs 运行：
-apt-get download libc++-12-dev=1:12.0.1-19ubuntu3 \
-  libc++abi-12-dev=1:12.0.1-19ubuntu3 libc++1-12=1:12.0.1-19ubuntu3 \
-  libc++abi1-12=1:12.0.1-19ubuntu3 libunwind-12-dev=1:12.0.1-19ubuntu3 \
-  libunwind-12=1:12.0.1-19ubuntu3
-# 对每个下载的 .deb 执行 dpkg-deb -x，目标为 build-toolchain/libcxx。
-
-# 回到仓库根目录：
-libcxx_root="$PWD/build-toolchain/libcxx/usr/lib/llvm-12"
-cmake -S . -B build-tsan-libcxx -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_CXX_COMPILER=clang++-12 \
-  "-DCMAKE_CXX_FLAGS=-stdlib=libc++ -isystem $libcxx_root/include/c++/v1" \
-  "-DCMAKE_EXE_LINKER_FLAGS=-L $libcxx_root/lib -Wl,-rpath,$libcxx_root/lib" \
-  -DTALON_TASK_LIMITER_SANITIZER=thread -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON \
-  -DFETCHCONTENT_SOURCE_DIR_TALON_STATUS="$PWD/build-bootstrap/_deps/talon_status-src" \
-  -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST="$PWD/build-debug/_deps/googletest-src"
-cmake --build build-tsan-libcxx --parallel 4
+python3 tools/build_tsan_runtime.py --jobs 4
+runtime_prefix="$PWD/build-toolchain/tsan-runtime"
+cmake -S . -B build-tsan-full -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_COMPILER=clang++-12 -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON \
+  "-DCMAKE_CXX_FLAGS=-stdlib=libc++ -fsanitize=thread -fno-omit-frame-pointer -isystem $runtime_prefix/include/c++/v1" \
+  "-DCMAKE_EXE_LINKER_FLAGS=-L $runtime_prefix/lib -Wl,-rpath,$runtime_prefix/lib" \
+  -DTALON_TASK_LIMITER_SANITIZER=thread
+cmake --build build-tsan-full --parallel 4
 TSAN_OPTIONS=halt_on_error=1 \
-  ctest --test-dir build-tsan-libcxx --output-on-failure --parallel 2
+  ctest --test-dir build-tsan-full --output-on-failure --parallel 2
 ```
 
-独立程序在此配置下退出 0，完整测试 72/72 通过，原来超时的结果移动异常路径也通过。已安装 libc++ 的机器通常只需 `clang++ -stdlib=libc++`；CI 的 TSan lane 采用这一配置，但远端 CI 尚未执行。
+脚本固定 LLVM 12.0.1 三个源码归档的 SHA-256，仅使用 LLVM 的 CMake 模块，不重建编译器。安装位置始终是工作目录中的 `tsan-runtime`，未修改系统 libc++。LLVM 12 的文本链接脚本不能执行 ELF RPATH 重写，构建脚本为该运行库设置 `CMAKE_SKIP_RPATH=ON`，由消费端提供运行库搜索路径。
 
-## 开发中遇到并已修正的问题
+GCC/libstdc++ 的 TSan `call_once` 异常展开超时仍可由 [once_exception.cc](../tests/toolchain/once_exception.cc) 独立复现；本次未重复跑已知会超时的整套配置，完整验证使用上述工具链。
 
-- 初次自动发现了 Conda 的 GoogleTest，启动报 `GLIBCXX_3.4.30 not found`，ldd 确认载入 Conda 的旧 libstdc++。切换到固定 GoogleTest 源码、同工具链构建后，全套正常执行。
-- 首次严格警告构建发现测试宏外缺少花括号导致 dangling-else 警告，已修正并重编译。
-- Clang 12 揭示测试对结构化绑定的捕获依赖更高语言标准；改为普通局部变量，保持 C++17 支持。
-- 本地解压 libc++ 的初次参数同时设置 `-nostdinc++` / `-stdlib=libc++`，触发 unused argument 严格警告；移除多余 `-nostdinc++` 后编译通过，未关闭严格警告。
+## 失败到通过的记录
 
-## 证据位置与限制
+| 原始失败 | 原因与处理 | 当前结果 |
+| --- | --- | --- |
+| 空函数指针提交返回 OK 后退出 139 | 发布前没有检查可空输入；增加校验与额度回滚 | 回归 Passed |
+| TLS 退出回调回归 `timeout 5s` 退出 124 | worker 标记清除过早 | 回归 Passed |
+| sanitizer 外部消费链接失败 | 静态库没有传递运行库链接参数 | 构建和运行 Passed |
+| 多前缀消费配置失败 | 分号参数被拆分 | 安装消费 Passed |
+| 错误构建目录先清理后报错 | 未检查参数和构建标识 | 受控临时目录回归 Passed |
+| Release `-Werror=mismatched-new-delete` | 替换 allocator 同 TU 内联后的 GCC 诊断 | 拆分 TU，保留警告，全部分配测试 Passed |
+| 未插桩 libc++ 的两项 TSan 报告 | 独立标准库程序复现；引用计数同步不可见 | 完整插桩后 Passed |
+| libc++ 安装 RPATH_CHANGE 失败 | CMake 对文本链接脚本做 ELF 修改 | 调整本地工具链配置后安装 Passed |
 
-本次构建目录保留 `ctest.log`、`Testing/Temporary/LastTest.log`；重复运行输出在 `build-release/stress.log`。包验证的负向编译诊断保存在 `build-*/package-check/installed/negative/*.log`。这些生成物不纳入 Git；可用上面的命令重建。基准原始 CSV 纳入版本库。
+## 静态检查的范围
 
-并发测试覆盖了大量可重复的竞争窗口，但不能枚举所有合法线程交错。外部对象寿命、跨执行器的循环等待、用户回调自身的数据竞争、永不结束的任务，仍须由使用者按公开契约管理。没有宣称任意用户代码无死锁或任意平台已验证。
+```sh
+python3 tools/check_style.py --build-dir build-debug
+clang-tidy-12 src/concurrent_task_limiter.cc -p build-debug \
+  --extra-arg=-std=c++17 \
+  --checks='-*,google-*,readability-braces-around-statements,bugprone-use-after-move,bugprone-exception-escape,bugprone-dangling-handle,clang-analyzer-*'
+```
+
+风格检查包括所有正常项目 TU，编译失败文件检查格式；Windows 条件分支的花括号另作源码检查。高级分析结果仅指生产核心和其头文件，不冒充并发或运行时验证。
+
+也执行过全测试 TU 的高级分析。其诊断包括故意抛异常/自身销毁的测试、验证拒绝不移动参数时的 moved-from 报告，以及 talon-status 错误态被错误地继续推导为 value 态的跨过程路径。后者与依赖的 `CheckError` 和 status/object 生命周期不变量矛盾；源码复核及动态验证未支持这些路径为真实缺陷。宽范围诊断保留在 `build-debug/review-tidy.log`，没有改写第三方代码或削弱测试来消除它们。
+
+## 证据与适用边界
+
+本次日志位于 `build-debug/review-ctest.log`、各配置 `review-run.log`、`build-release/review-stress.log`、`build-debug/style-check.log` 及各构建的 `Testing/Temporary`。故障注入隔离、完整工具链要求与平台限制均是验证范围的一部分。性能原始 CSV 纳入 Git，见 [performance.md](performance.md)。
+
+这些检查不能穷尽所有调度、任意编译器或任意用户回调。外部生命周期、共享数据同步、返回借用引用/view/指针的寿命及应用自身等待依赖仍须符合 [公开契约](../README.md)；也没有把有限基准解释为所有负载下的性能最优。

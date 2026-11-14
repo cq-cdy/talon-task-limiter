@@ -1,0 +1,11 @@
+phase,trial,seconds,max_rss_kib
+initial,1,0.50,133052
+review,1,0.49,132380
+review,2,0.48,133380
+initial,2,0.49,132988
+initial,3,0.45,131876
+review,3,0.46,132544
+review,4,0.47,131688
+initial,4,0.49,132756
+initial,5,0.47,132132
+review,5,0.48,133188

@@ -6,3 +6,5 @@
 *.profdata
 *.gcda
 *.gcno
+__pycache__/
+*.py[cod]

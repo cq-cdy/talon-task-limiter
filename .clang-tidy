@@ -1,0 +1,6 @@
+Checks: '-*,google-*,readability-braces-around-statements'
+WarningsAsErrors: '*'
+HeaderFilterRegex: '(^|/)(include/talon/task_limiter/|include/talon/concurrent_task_limiter.h|src/|tests/|examples/|benchmarks/)'
+CheckOptions:
+  - key: readability-braces-around-statements.ShortStatementLines
+    value: '0'

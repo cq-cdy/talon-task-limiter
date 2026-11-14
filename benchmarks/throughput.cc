@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -7,7 +8,6 @@
 #include <iomanip>
 #include <iostream>
 #include <mutex>
-#include <stdexcept>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -15,14 +15,14 @@
 #include "talon/concurrent_task_limiter.h"
 
 namespace {
-int Parse(const char* text) {
+talon::StatusOr<int> Parse(const char* text) {
   std::string_view view(text);
   int value = 0;
   const auto result =
       std::from_chars(view.data(), view.data() + view.size(), value);
   if (result.ec != std::errc() || result.ptr != view.data() + view.size() ||
       value < 0) {
-    throw std::invalid_argument("Expected nonnegative integer");
+    return talon::InvalidArgumentError("Expected nonnegative integer");
   }
   return value;
 }
@@ -40,16 +40,25 @@ int main(int argc, char** argv) {
     return 1;
   }
   try {
-    const int producers = Parse(argv[1]);
-    const int workers = Parse(argv[2]);
-    const int capacity = Parse(argv[3]);
-    const int tasks = Parse(argv[4]);
-    const int work = Parse(argv[5]);
+    std::array<int, 5> arguments{};
+    for (int i = 0; i < 5; ++i) {
+      auto parsed = Parse(argv[i + 1]);
+      if (!parsed.ok()) {
+        std::cerr << parsed.status() << '\n';
+        return 1;
+      }
+      arguments[i] = *parsed;
+    }
+    const int producers = arguments[0];
+    const int workers = arguments[1];
+    const int capacity = arguments[2];
+    const int tasks = arguments[3];
+    const int work = arguments[4];
     if (producers == 0 || producers > 256 || workers == 0 || workers > 1024 ||
         capacity < workers || tasks == 0) {
-      throw std::invalid_argument(
-          "Require 1..256 producers, 1..1024 workers, capacity >= workers, "
-          "tasks > 0");
+      std::cerr << "Require 1..256 producers, 1..1024 workers, "
+                   "capacity >= workers, tasks > 0\n";
+      return 1;
     }
     talon::ConcurrentTaskLimiter::Options options;
     options.max_concurrent = capacity;
@@ -72,28 +81,36 @@ int main(int argc, char** argv) {
         for (;;) {
           auto status = limiter.Schedule([&, id] {
             std::uint64_t value = id + 1;
-            for (int step = 0; step < work; ++step)
+            for (int step = 0; step < work; ++step) {
               value = value * 1664525 + 1013904223;
+            }
             checksum.fetch_xor(value, std::memory_order_relaxed);
             completed.fetch_add(1, std::memory_order_relaxed);
           });
-          if (status.ok()) break;
-          if (status.code() != talon::StatusCode::kResourceExhausted)
+          if (status.ok()) {
+            break;
+          }
+          if (status.code() != talon::StatusCode::kResourceExhausted) {
             std::terminate();
+          }
           ++stats[static_cast<std::size_t>(producer)].rejected;
           std::this_thread::yield();
         }
       }
     };
     try {
-      for (int i = 0; i < producers; ++i) threads.emplace_back(produce, i);
+      for (int i = 0; i < producers; ++i) {
+        threads.emplace_back(produce, i);
+      }
     } catch (...) {
       {
         std::lock_guard<std::mutex> lock(start_mutex);
         start = true;
       }
       start_cv.notify_all();
-      for (auto& thread : threads) thread.join();
+      for (auto& thread : threads) {
+        thread.join();
+      }
       throw;
     }
     const auto begin = std::chrono::steady_clock::now();
@@ -102,15 +119,20 @@ int main(int argc, char** argv) {
       start = true;
     }
     start_cv.notify_all();
-    for (auto& thread : threads) thread.join();
+    for (auto& thread : threads) {
+      thread.join();
+    }
     const auto status = limiter.Shutdown();
     const auto end = std::chrono::steady_clock::now();
     if (!status.ok() ||
-        completed != static_cast<std::uint64_t>(producers) * tasks)
+        completed != static_cast<std::uint64_t>(producers) * tasks) {
       return 2;
+    }
     const double seconds = std::chrono::duration<double>(end - begin).count();
     std::uint64_t rejected = 0;
-    for (const auto& stat : stats) rejected += stat.rejected;
+    for (const auto& stat : stats) {
+      rejected += stat.rejected;
+    }
     std::cout << "producers,workers,capacity,tasks_per_producer,work,completed,"
                  "rejections,seconds,tasks_per_second,checksum\n"
               << producers << ',' << workers << ',' << capacity << ',' << tasks

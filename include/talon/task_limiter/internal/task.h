@@ -15,11 +15,52 @@ namespace task_limiter_internal {
 // An intrusive queue avoids a second allocation when publishing a task. Only
 // the executor accesses next; payload construction/destruction happens
 // unlocked.
-struct Task {
+class Task {
+ public:
   virtual ~Task() = default;
   virtual void Run() = 0;
-  std::unique_ptr<Task> next;
+  std::unique_ptr<Task> TakeNext() noexcept { return std::move(next_); }
+  void SetNext(std::unique_ptr<Task> next) noexcept { next_ = std::move(next); }
+
+ private:
+  std::unique_ptr<Task> next_;
 };
+
+template <typename Target>
+bool IsNullMemberTarget(const Target&) noexcept {
+  return false;
+}
+
+template <typename Target>
+bool IsNullMemberTarget(Target* target) noexcept {
+  return target == nullptr;
+}
+
+template <typename Target, typename Deleter>
+bool IsNullMemberTarget(
+    const std::unique_ptr<Target, Deleter>& target) noexcept {
+  return target == nullptr;
+}
+
+template <typename Target>
+bool IsNullMemberTarget(const std::shared_ptr<Target>& target) noexcept {
+  return target == nullptr;
+}
+
+// Only inspect nullable standard invocation forms. Arbitrary user-defined
+// dereference/conversion operators retain their own validity contracts.
+template <typename Func, typename... Args>
+bool HasNullInvocationTarget(const Func& func, const Args&... args) noexcept {
+  if constexpr (std::is_pointer_v<Func> || std::is_member_pointer_v<Func>) {
+    if (func == nullptr) {
+      return true;
+    }
+  }
+  if constexpr (std::is_member_pointer_v<Func> && sizeof...(Args) != 0) {
+    return IsNullMemberTarget(std::get<0>(std::tie(args...)));
+  }
+  return false;
+}
 
 template <typename Func, typename... Args>
 class BoundTask final : public Task {
@@ -47,6 +88,11 @@ template <typename Result, typename Func, typename... Args>
 class FutureTask final : public Task {
   static_assert(!std::is_rvalue_reference_v<Result>,
                 "std::future does not support rvalue reference results");
+  static_assert(std::is_void_v<Result> || std::is_lvalue_reference_v<Result> ||
+                    (std::is_move_constructible_v<Result> &&
+                     std::is_nothrow_destructible_v<Result>),
+                "Future value results must be move-constructible and have "
+                "noexcept destructors");
   static_assert(std::is_nothrow_destructible_v<Func> &&
                     (std::is_nothrow_destructible_v<Args> && ...),
                 "Task captures must have noexcept destructors");

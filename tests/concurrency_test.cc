@@ -57,7 +57,9 @@ TEST_P(Contention, ExactlyCapacityAcceptedUnderSimultaneousAdmission) {
     });
   }
   start.Open();
-  for (auto& thread : threads) thread.join();
+  for (auto& thread : threads) {
+    thread.join();
+  }
   EXPECT_EQ(accepted.load(), capacity);
   EXPECT_EQ(rejected.load(), capacity * (producers - 1));
   const auto snapshot = limiter.GetSnapshot();
@@ -75,7 +77,9 @@ TEST_P(Contention, RepeatedAdmissionRunsEveryAcceptedTaskExactlyOnce) {
   constexpr int kTasksPerProducer = 200;
   const int total = producers * kTasksPerProducer;
   std::vector<std::atomic<int>> executions(static_cast<std::size_t>(total));
-  for (auto& count : executions) count.store(0);
+  for (auto& count : executions) {
+    count.store(0);
+  }
   std::atomic<int> active{0};
   std::atomic<int> peak{0};
   std::atomic<bool> done{false};
@@ -104,7 +108,9 @@ TEST_P(Contention, RepeatedAdmissionRunsEveryAcceptedTaskExactlyOnce) {
             const int running = active.fetch_add(1) + 1;
             talon_test::UpdatePeak(peak, running);
             ++executions[static_cast<std::size_t>(id)];
-            if ((id & 7) == 0) std::this_thread::yield();
+            if ((id & 7) == 0) {
+              std::this_thread::yield();
+            }
             --active;
           });
           if (!status.ok()) {
@@ -116,7 +122,9 @@ TEST_P(Contention, RepeatedAdmissionRunsEveryAcceptedTaskExactlyOnce) {
     });
   }
   start.Open();
-  for (auto& thread : threads) thread.join();
+  for (auto& thread : threads) {
+    thread.join();
+  }
   EXPECT_TRUE(limiter.WaitIdle().ok());
   done.store(true);
   observer.join();
@@ -159,7 +167,9 @@ TEST(Concurrency, CloseRacesWithProducersWithoutLossOrDuplicateExecution) {
             EXPECT_TRUE(status.code() == StatusCode::kResourceExhausted ||
                         status.code() == StatusCode::kFailedPrecondition);
           }
-          if (attempt == 0) first_attempt.Arrive();
+          if (attempt == 0) {
+            first_attempt.Arrive();
+          }
         }
       });
     }
@@ -167,7 +177,9 @@ TEST(Concurrency, CloseRacesWithProducersWithoutLossOrDuplicateExecution) {
     first_attempt.Wait();
     limiter.Close();
     EXPECT_TRUE(limiter.Shutdown().ok());
-    for (auto& producer : producers) producer.join();
+    for (auto& producer : producers) {
+      producer.join();
+    }
     EXPECT_EQ(admitted, executed) << "round=" << round;
     EXPECT_EQ(limiter.GetSnapshot().outstanding, 0U);
     EXPECT_EQ(limiter.Schedule([] {}).code(), StatusCode::kFailedPrecondition);
@@ -205,7 +217,9 @@ TEST(Concurrency, ManyConcurrentShutdownCallersAllReturnAfterDrain) {
   talon_test::SpinUntil([&] { return !limiter.GetSnapshot().accepting; });
   EXPECT_EQ(returned.load(), 0);
   release.Open();
-  for (auto& caller : callers) caller.join();
+  for (auto& caller : callers) {
+    caller.join();
+  }
   EXPECT_EQ(returned.load(), 32);
 }
 
@@ -232,7 +246,9 @@ TEST(Concurrency, AllIdleWaitersWakeOnLastCompletion) {
     }
     entered.Wait();
     release.Open();
-    for (auto& waiter : waiters) waiter.join();
+    for (auto& waiter : waiters) {
+      waiter.join();
+    }
   }
 }
 
@@ -286,7 +302,8 @@ TEST(Concurrency, MixedFuturesExceptionsAndCaptureFailures) {
       for (int i = 0; i < kTasks; ++i) {
         const auto kind = random() % 4;
         if (kind == 0) {
-          struct ThrowOnMove {
+          class ThrowOnMove {
+           public:
             ThrowOnMove() = default;
             ThrowOnMove(ThrowOnMove&&) { throw 11; }
             void operator()() {}
@@ -310,7 +327,9 @@ TEST(Concurrency, MixedFuturesExceptionsAndCaptureFailures) {
         } else {
           talon_test::SpinUntil([&] {
             auto result = limiter.Submit([&, kind] {
-              if (kind == 2) throw 13;
+              if (kind == 2) {
+                throw 13;
+              }
               ++successes;
               return 42;
             });
@@ -331,7 +350,9 @@ TEST(Concurrency, MixedFuturesExceptionsAndCaptureFailures) {
     });
   }
   start.Open();
-  for (auto& producer : producers) producer.join();
+  for (auto& producer : producers) {
+    producer.join();
+  }
   EXPECT_TRUE(limiter.WaitIdle().ok());
   EXPECT_EQ(handled.load(), expected_handlers.load());
   EXPECT_EQ(successes.load(), expected_successes.load());
@@ -357,8 +378,9 @@ TEST(Concurrency, IdlePublishesNonAtomicTaskWrites) {
 
 TEST(Concurrency, ManyExecutorsHaveIndependentWorkerAndReservationMarkers) {
   std::vector<std::unique_ptr<ConcurrentTaskLimiter>> limiters;
-  for (int i = 0; i < 8; ++i)
+  for (int i = 0; i < 8; ++i) {
     limiters.push_back(std::make_unique<ConcurrentTaskLimiter>(2));
+  }
   std::vector<std::thread> producers;
   for (int i = 0; i < 8; ++i) {
     producers.emplace_back([&, i] {
@@ -374,6 +396,8 @@ TEST(Concurrency, ManyExecutorsHaveIndependentWorkerAndReservationMarkers) {
       }
     });
   }
-  for (auto& producer : producers) producer.join();
+  for (auto& producer : producers) {
+    producer.join();
+  }
 }
 }  // namespace
