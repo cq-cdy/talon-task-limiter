@@ -15,11 +15,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-14, windows-2022]
+        os: [ubuntu-22.04, macos-15, windows-2022]
         shared: ["ON", "OFF"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Set up MSVC environment for compiler probes
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$installation) { throw 'Visual Studio C++ tools were not found' }
+          $vcvars = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
+          & cmd /s /c "`"$vcvars`" >nul && set" | ForEach-Object {
+            if ($_ -match '^(INCLUDE|LIB|LIBPATH|PATH)=') { $_ >> $env:GITHUB_ENV }
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC environment setup failed' }
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=${{ matrix.shared }} -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON
       - name: Build
@@ -36,7 +48,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install compiler for TSan runtime
         if: matrix.sanitizer == 'thread'
-        run: sudo apt-get update && sudo apt-get install -y clang-12 libclang-rt-12-dev
+        run: sudo apt-get update && sudo apt-get install -y clang-12 libclang-common-12-dev
       - name: Build instrumented standard library
         if: matrix.sanitizer == 'thread'
         run: python3 tools/build_tsan_runtime.py --jobs 4

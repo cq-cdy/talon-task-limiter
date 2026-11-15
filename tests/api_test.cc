@@ -303,13 +303,24 @@ TEST(Submission, EmptyFunctionReportsBadFunctionCall) {
 TEST(Submission, ThrowingResultMoveReachesFuture) {
   class Result {
    public:
-    Result() = default;
+    // A non-default constructor makes every supported standard library use
+    // move construction. MSVC's promise otherwise uses move assignment.
+    explicit Result(std::atomic<int>* moves) : moves_(moves) {}
     Result(const Result&) = delete;
-    Result(Result&&) { throw std::runtime_error("result move"); }
+    Result(Result&& other) : moves_(other.moves_) {
+      moves_->fetch_add(1);
+      throw std::runtime_error("result move");
+    }
+
+   private:
+    std::atomic<int>* moves_;
   };
+  std::atomic<int> moves{0};
   ConcurrentTaskLimiter limiter(1);
-  auto result = limiter.Submit([] { return Result(); });
+  auto result = limiter.Submit([&moves] { return Result(&moves); });
   ASSERT_TRUE(result.ok());
+  result->wait();
+  EXPECT_EQ(moves.load(), 1);
   EXPECT_THROW(result->get(), std::runtime_error);
   EXPECT_TRUE(limiter.WaitIdle().ok());
 }

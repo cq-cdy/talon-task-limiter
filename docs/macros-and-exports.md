@@ -66,4 +66,6 @@ __attribute__((visibility("default"))) Status Shutdown();
 
 项目默认隐藏实现符号，导出宏让需要跨库调用的函数可见。若直接删掉宏，共享库的调用端可能找不到 `Shutdown` 等符号。部分 private 辅助函数也需要导出：公开模板在调用者 TU 中实例化，会调用库内的 `TryAcquire`、`Enqueue`、Reservation 构造/析构；C++ 访问权限和动态链接可见性是不同的机制。
 
+Reservation 只在构造/析构函数上标记导出，不能导出整个类。整个类的 DLL 标记会连带作用于静态 `thread_local current_`，MSVC 因此报 C2492。TLS 指针和 Contains 都只由库内部访问，不需要出现在 DLL 接口中。
+
 生成规则位于 `CMakeLists.txt` 的 `generate_export_header`，头文件位于 `<build>/include/talon/task_limiter/export.h`，安装时复制到 `<prefix>/include/talon/task_limiter/export.h`。构建共享库时 CMake 自动定义 `talon_task_limiter_EXPORTS`，静态消费使用 `TALON_TASK_LIMITER_STATIC_DEFINE`；调用者链接公开 target 即可获得正确配置。

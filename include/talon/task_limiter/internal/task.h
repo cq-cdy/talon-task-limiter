@@ -50,7 +50,8 @@ bool IsNullMemberTarget(const std::shared_ptr<Target>& target) noexcept {
 // Only inspect nullable standard invocation forms. Arbitrary user-defined
 // dereference/conversion operators retain their own validity contracts.
 template <typename Func, typename... Args>
-bool HasNullInvocationTarget(const Func& func, const Args&... args) noexcept {
+bool HasNullInvocationTarget([[maybe_unused]] const Func& func,
+                             [[maybe_unused]] const Args&... args) noexcept {
   if constexpr (std::is_pointer_v<Func> || std::is_member_pointer_v<Func>) {
     if (func == nullptr) {
       return true;

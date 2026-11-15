@@ -90,6 +90,8 @@ target_link_libraries(my_app PRIVATE talon::task_limiter)
 
 成功取得额度后，空原始函数指针、成员指针以及空的原始/标准智能成员目标会返回 `InvalidArgument`，不会发布任务。自定义间接访问对象和借用引用仍须由调用者保证有效。future 的值结果要求可移动构造且析构不抛异常；void 和左值引用结果也受支持。
 
+`Submit` 还受平台 `std::promise` / `std::future` 实现约束。MSVC 14.44 对可默认构造的结果使用赋值保存，因此“可默认构造、可移动构造、不可赋值”的类型无法实例化其 promise；不可默认构造的结果走移动构造路径。此限制来自 [Microsoft STL 的结果存储实现](https://github.com/microsoft/STL/blob/vs-2022-17.14/stl/inc/future)。在该标准库上，可使用可赋值的结果、非默认构造的值类型，或 `std::unique_ptr<R>`。
+
 `Schedule` / `Submit` 中的任务分配、参数复制或移动异常原样传播，额度自动回滚。Status 的错误消息也可能分配内存，所以这些 API 不是完整内存耗尽场景下的 `noexcept` 接口。
 
 构造阶段异常不承诺恢复已经移动的输入。拒绝时不移动的保证从函数入口开始，不覆盖调用表达式求值时已经发生的操作；需要重试 move-only 工作时，应像压力测试那样先保存具名 callable，再尝试提交。

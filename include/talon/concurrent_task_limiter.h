@@ -162,12 +162,13 @@ class ConcurrentTaskLimiter final {
   [[nodiscard]] TALON_TASK_LIMITER_EXPORT Snapshot GetSnapshot() const;
 
  private:
-  class TALON_TASK_LIMITER_EXPORT Reservation {
+  class Reservation {
    public:
-    explicit Reservation(ConcurrentTaskLimiter* owner) noexcept;
+    TALON_TASK_LIMITER_EXPORT explicit Reservation(
+        ConcurrentTaskLimiter* owner) noexcept;
     Reservation(const Reservation&) = delete;
     Reservation& operator=(const Reservation&) = delete;
-    ~Reservation();
+    TALON_TASK_LIMITER_EXPORT ~Reservation();
     void Commit() noexcept { committed_ = true; }
     static bool Contains(const ConcurrentTaskLimiter* owner) noexcept;
 
