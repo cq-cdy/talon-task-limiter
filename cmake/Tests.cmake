@@ -6,6 +6,11 @@ add_executable(talon_task_limiter_test
   tests/macro_integration_test.cc)
 target_link_libraries(talon_task_limiter_test PRIVATE talon::task_limiter GTest::gtest_main)
 talon_task_limiter_target(talon_task_limiter_test)
+if(MSVC)
+  # Fault-injection captures deliberately always throw from construction.
+  # MSVC then diagnoses the remaining task initializers as unreachable.
+  target_compile_options(talon_task_limiter_test PRIVATE /wd4702)
+endif()
 gtest_discover_tests(talon_task_limiter_test DISCOVERY_MODE PRE_TEST NO_PRETTY_VALUES
   TEST_PREFIX "limiter." PROPERTIES TIMEOUT 90)
 
