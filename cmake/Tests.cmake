@@ -31,7 +31,23 @@ if(TALON_TASK_LIMITER_SANITIZER STREQUAL "none")
   # Keep allocation interposition opaque even if a parent enables global LTO.
   set_target_properties(talon_task_limiter_allocation_test PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION FALSE)
-  target_link_libraries(talon_task_limiter_allocation_test PRIVATE talon::task_limiter GTest::gtest_main)
+  if(WIN32 AND talon_task_limiter_type STREQUAL "SHARED_LIBRARY")
+    # PE imports bind a DLL's allocator to its CRT, not to operator new in the
+    # test EXE. Compile the identical implementation into this isolated fault
+    # injector; the main, workload and installed-consumer tests use the DLL.
+    target_sources(talon_task_limiter_allocation_test PRIVATE src/concurrent_task_limiter.cc)
+    target_include_directories(talon_task_limiter_allocation_test PRIVATE
+      $<TARGET_PROPERTY:talon_task_limiter,INTERFACE_INCLUDE_DIRECTORIES>)
+    target_compile_definitions(talon_task_limiter_allocation_test PRIVATE
+      TALON_TASK_LIMITER_STATIC_DEFINE
+      $<TARGET_PROPERTY:talon_task_limiter,INTERFACE_COMPILE_DEFINITIONS>)
+    target_compile_features(talon_task_limiter_allocation_test PRIVATE cxx_std_17)
+    target_link_libraries(talon_task_limiter_allocation_test PRIVATE
+      talon::status Threads::Threads GTest::gtest_main)
+  else()
+    target_link_libraries(talon_task_limiter_allocation_test PRIVATE
+      talon::task_limiter GTest::gtest_main)
+  endif()
   talon_task_limiter_target(talon_task_limiter_allocation_test)
   gtest_discover_tests(talon_task_limiter_allocation_test DISCOVERY_MODE PRE_TEST
     TEST_PREFIX "limiter." PROPERTIES TIMEOUT 90)

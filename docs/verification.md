@@ -106,6 +106,8 @@ ctest --test-dir build-publish-fresh --output-on-failure --parallel 4
 - 结果移动异常测试使用非默认构造的结果，并核对 future 就绪前已执行一次移动。MSVC promise 对默认构造结果的赋值限制已在 README 公开说明。
 - 死亡测试在真正触发终止的线程上安装处理器，继续精确要求退出码 73。MSVC 的终止处理器具有线程局部语义，原来仅在主线程设置并不足够。
 - 独立 Windows 构建默认将程序及 DLL 放在同一运行目录；消费探针的 `try_compile` 显式使用被安装库的配置，避免 Release 库与 Debug CRT 混用。
+- MSVC 会在实例化公开返回类型时提前拒绝某些非法 future 结果；负向编译检查接受这一精确的标准库诊断，同时仍要求编译失败和正向基线成功。
+- Windows EXE 的 `operator new` 替换不能拦截 DLL 内部分配。Windows 共享配置的分配注入进程直接编译同一份库实现，使故障真正覆盖线程启动和构造；其余接口、工作负载及安装消费仍链接实际 DLL。保留原有注入次数、回滚及清理断言，不将它报告为 DLL 内分配拦截成功。
 - 更新已退役的 macOS runner，修正 Ubuntu Clang 12 运行库包名，并为 Windows 直接编译器探针准备 MSVC 环境。
 
 Linux 普通配置有 256 项，Windows/macOS 有 240 项；相差的 16 项是 Linux 专用 pthread 创建故障注入。Sanitizer 配置仍为 230 项。各次失败和后续重验均保留在 Actions 历史中，最终状态以具体提交为准。

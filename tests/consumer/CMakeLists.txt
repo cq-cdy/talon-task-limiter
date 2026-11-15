@@ -60,6 +60,12 @@ if(CHECK_COMPILE_FAILURES)
     else()
       set(expected "deleted")
     endif()
+    if(MSVC AND case STREQUAL "rvalue_result")
+      # MSVC checks the public std::future return type before instantiating
+      # FutureTask. Accept that precise result-type rejection too, not an
+      # unrelated compile/link failure.
+      string(APPEND expected "|T in future<T> must meet the.*Cpp17Destructible requirements")
+    endif()
     if(NOT diagnostic MATCHES "${expected}")
       message(FATAL_ERROR "Wrong failure for ${case}: ${diagnostic}")
     endif()
