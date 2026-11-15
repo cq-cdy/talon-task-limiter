@@ -36,7 +36,7 @@ if(CHECK_COMPILE_FAILURES)
       rvalue_result copy_executor throwing_result_destructor immovable_result
       throwing_argument_destructor move_only_lvalue borrow_requires_ref
       noncopyable_callable_lvalue wrong_arity const_borrow_mutation
-      move_executor assign_executor move_assign_executor)
+      move_executor assign_executor move_assign_executor macro_counter_mode)
     try_compile(unexpected_success "${CMAKE_CURRENT_BINARY_DIR}/negative/${case}"
       SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../compile_fail/${case}.cc"
       LINK_LIBRARIES talon::task_limiter OUTPUT_VARIABLE diagnostic)
@@ -55,6 +55,8 @@ if(CHECK_COMPILE_FAILURES)
       # The unavailable tuple construction is diagnosed differently by each
       # standard library; all compilers must reject copying the move-only arg.
       set(expected "(deleted|no matching|no suitable|cannot convert|no overloaded)")
+    elseif(case STREQUAL "macro_counter_mode")
+      set(expected "requires TALON_STATUS_USE_LINE_COUNTER=1")
     else()
       set(expected "deleted")
     endif()

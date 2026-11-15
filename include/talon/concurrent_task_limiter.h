@@ -2,6 +2,15 @@
 #ifndef TALON_CONCURRENT_TASK_LIMITER_H_
 #define TALON_CONCURRENT_TASK_LIMITER_H_
 
+// Inline/template definitions must have identical tokens in every translation
+// unit. The CMake target supplies this setting before any Talon macro header.
+// For manual integration, define it before including any Talon macro headers.
+#ifndef TALON_STATUS_USE_LINE_COUNTER
+#define TALON_STATUS_USE_LINE_COUNTER 1
+#elif TALON_STATUS_USE_LINE_COUNTER != 1
+#error "talon-task-limiter requires TALON_STATUS_USE_LINE_COUNTER=1"
+#endif
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -15,6 +24,7 @@
 #include <utility>
 
 #include "talon/status.h"
+#include "talon/status_macros.h"
 #include "talon/status_or.h"
 #include "talon/task_limiter/export.h"
 #include "talon/task_limiter/internal/task.h"
@@ -74,10 +84,7 @@ class ConcurrentTaskLimiter final {
       Options options) {
     // Keep StatusOr in the caller's translation unit: its AUTO backend depends
     // on the language mode, so it must not cross the compiled library boundary.
-    Status status = ValidateOptions(options);
-    if (!status.ok()) {
-      return status;
-    }
+    TALON_RETURN_IF_ERROR(ValidateOptions(options));
     try {
       return std::make_unique<ConcurrentTaskLimiter>(std::move(options));
     } catch (const std::bad_alloc&) {
@@ -101,10 +108,7 @@ class ConcurrentTaskLimiter final {
         std::is_invocable_v<std::decay_t<Func>, std::decay_t<Args>...>,
         "Task must be invocable with decayed rvalues; use std::ref "
         "for borrowed lvalues");
-    Status status = TryAcquire();
-    if (!status.ok()) {
-      return status;
-    }
+    TALON_RETURN_IF_ERROR(TryAcquire());
     Reservation reservation(this);
     if (task_limiter_internal::HasNullInvocationTarget(func, args...)) {
       return InvalidArgumentError("Task callable or member target is null");
@@ -123,10 +127,7 @@ class ConcurrentTaskLimiter final {
   [[nodiscard]] auto Submit(Func&& func, Args&&... args) -> StatusOr<
       std::future<task_limiter_internal::ResultFor<Func, Args...>>> {
     using Result = task_limiter_internal::ResultFor<Func, Args...>;
-    Status status = TryAcquire();
-    if (!status.ok()) {
-      return status;
-    }
+    TALON_RETURN_IF_ERROR(TryAcquire());
     Reservation reservation(this);
     if (task_limiter_internal::HasNullInvocationTarget(func, args...)) {
       return InvalidArgumentError("Task callable or member target is null");

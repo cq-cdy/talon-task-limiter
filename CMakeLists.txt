@@ -44,6 +44,9 @@ target_include_directories(talon_task_limiter PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_compile_features(talon_task_limiter PUBLIC cxx_std_17)
+# Talon propagation macros occur in public inline/template definitions. Line
+# mode prevents include-order-dependent __COUNTER__ names from violating ODR.
+target_compile_definitions(talon_task_limiter PUBLIC TALON_STATUS_USE_LINE_COUNTER=1)
 target_link_libraries(talon_task_limiter PUBLIC talon::status Threads::Threads)
 
 function(talon_task_limiter_target target)

@@ -1,118 +1,74 @@
-# 验证记录（整体审查后）
+# 验证记录（工具宏与复合工作负载）
 
-执行日期：2026-11-15，Linux x86_64 / WSL2，CMake 3.26.5。初版 `31e876d` 的记录保留在 [verification-initial.md](verification-initial.md)；本文件对应本次修复和扩展测试。
+执行日期：2026-11-15。此前整体审查的数据保留在 [verification-review.md](verification-review.md)，初版记录见 [verification-initial.md](verification-initial.md)。本轮没有把历史通过次数算作新测试结果。
 
-## 实际结果
+## 本轮结果
 
-| 检查 | 状态 | 结果 |
+| 配置 / 检查 | 状态 | 实际结果 |
 | --- | --- | --- |
-| GCC 11 Debug 静态库 | Passed | 233/233；分配注入拆分后，受影响的 11 项另外重跑通过 |
-| GCC 12 Release 静态库 | Passed | 233/233 |
-| GCC 12 Release 共享库 | Passed | 233/233 |
-| Clang 12 ASan + UBSan + leak detection | Passed | 207/207，含安装消费与 sanitizer 运行库传递 |
-| Clang 12 TSan，完整插桩 libc++/libc++abi/GTest | Passed | 207/207，无 suppression，无跳过异常路径 |
-| TSan 生命周期重点回归重复 | Passed | 原先涉及的两项及 TLS 自等待回归，各连续 20 次通过 |
-| Release 核心测试打乱顺序重复 | Passed | 203 项 × 30 轮 = 6,090 次测试执行 |
-| C++23 外部消费 C++17 共享库 | Passed | 正向配置、编译、运行和 16 个负向编译检查 |
-| 安装测试脚本的清理保护 | Passed | 受控哨兵证明错误参数不再先删除目录；无参数调用也提前失败 |
-| Google 格式 / 花括号 | Static check only | 39 个 C++ 文件格式通过；19 个正常编译的 TU 通过 Google/brace 检查 |
-| 生产核心高级静态分析 | Static check only | `src/concurrent_task_limiter.cc` 及对应项目头通过选定的 bugprone / Clang Analyzer 检查 |
-| Windows / macOS / 远端 CI | Not executed | 已提供配置，当前环境没有执行这些平台 |
-| LLVM 自身完整测试套件 | Not executed | 这里只构建测试工具链，并以独立 probe 和本项目测试验证所需路径 |
+| GCC 11 Debug 静态库 | Passed | 256/256 |
+| GCC 12 Release 静态库 | Passed | 256/256 |
+| GCC 12 Release 共享库 | Passed | 256/256 |
+| Clang 12 ASan/UBSan、leak detection | Passed | 230/230，包含全部 17 项工作负载 |
+| Clang 12 TSan、完整插桩 libc++/libc++abi/GTest | Passed | 230/230，包含全部 17 项工作负载 |
+| Release 工作负载打乱顺序重复 | Passed | 17 项 × 5 轮 = 85 次复合工作负载执行 |
+| C++23 外部消费 | Passed | 配置、编译、运行通过；17 个负向编译用例通过 |
+| Google 格式 / 花括号 | Static check only | 47 个 C++ 文件、25 个正常 TU 通过 |
+| 宏展开的 ODR 检查 | Passed | 不同 __COUNTER__ 历史下，预处理后的完整公共类定义相同 |
+| 共享符号检查 | Static check only | 本机生成头及 nm 动态符号表已检查 |
+| Windows/macOS 原生运行、远端 CI | Not executed | 当前仅在 Linux/WSL2 实际执行 |
 
-233 = 203 项核心测试 + 11 项分配故障 + 16 项 Linux 线程启动测试 + 头文件/多 TU + 安装消费 + 示例。Sanitizer 配置保留全部 203 核心项，隔离自定义 allocator / pthread interposition，另运行头文件、裸 sanitizer 消费端、安装消费和示例，共 207 项。16 个编译失败检查包含在安装消费测试内，不重复计数。
+256 = 208 项核心测试 + 17 项复合工作负载 + 11 项分配注入 + 16 项 Linux 线程启动测试 + 头文件/多 TU + 宏 ODR + 安装消费 + 示例。Sanitizer 隔离 allocator / pthread interposition，同时增加裸 sanitizer 消费端，共 230 项。17 项预期编译失败嵌套在安装消费测试内，不重复计数。
 
-单次大负载测试包含 262,144 个任务；30 轮仅这一项就核对了 7,864,320 次执行和对应资源释放。还包含 288 个并发历史、48 组构造/回滚矩阵、128 层嵌套以及跨池任务树，详见 [review.md](review.md)。没有禁用原有断言或删除关键路径测试。
+## 宏改写的验证重点
 
-## 常规构建与运行
+- 原来的状态传播改为依赖提供的 TALON_RETURN_IF_ERROR；示例和实际数据计算辅助函数使用 TALON_ASSIGN_OR_RETURN。
+- 检查表达式只求值一次、二进制错误消息保持完整、move-only future/值正确转移、早返回执行 RAII，并且满载失败不归还其他任务占用的额度。
+- CMake target 和安装导出传递 TALON_STATUS_USE_LINE_COUNTER=1；显式选择 0 的消费者有独立的预期编译失败测试。
+- 两个源文件分别直接包含公共头、先展开 32 次 __COUNTER__ 再包含公共头，预处理后比较完整公共定义。检查位于 cmake/CheckMacroOdr.cmake。
+- 消费端先定义自己的短名字宏、先包含 Talon 宏头，再包含执行器头；验证库没有覆盖 RETURN_IF_ERROR/ASSIGN_OR_RETURN。
 
-沿用初版记录中的固定依赖源码缓存。以下是本次实际使用的配置/命令组合；所有目录都在仓库内。
+这是一项编译配置变化，手动集成和每行 ASSIGN 的要求见 [macros-and-exports.md](macros-and-exports.md)。
+
+## 工作负载及规模
+
+完整场景说明见 [workloads.md](workloads.md)。本次实际执行了：
+
+- 262,144 和 1,048,576 个复合 CPU 作业，混合 Schedule/Submit；大场景保留 262,144 个 future，逐任务对照参考摘要，核对 payload 清理及存活上界。
+- 六种矩阵流水线：规则/不规则边界分块、独立归并执行器、真实乘加计算、业务错误及计算中途 Close。
+- 五种跨三个池的数据 DAG，包含每阶段 4,194,304 条记录、连续四阶段的最大成功场景；比较分片排序/k-way merge 与整批串行排序，核对每个阶段节点。
+- 四种析构驱动链：最多八条链 × 96 步 × 16,384 个 64-bit 字，验证重入、外部背压调度、Close 和部分完成结果。
+
+测试中的整数算法使用确定输入和精确 oracle；不是只数任务次数，也不以 sleep 猜测调度顺序。关闭阈值不会被误当作实际 Close 的线性化时间。
+
+## 命令与日志
+
+已在现有固定依赖配置上执行：
 
 ```sh
-cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON
-cmake --build build-debug --parallel 4
-ctest --test-dir build-debug --output-on-failure --parallel 4
-
-cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_CXX_COMPILER=g++-12 -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON \
-  -DTALON_TASK_LIMITER_BUILD_BENCHMARKS=ON
+cmake --build build-debug --parallel 3
 cmake --build build-release --parallel 3
-ctest --test-dir build-release --output-on-failure --parallel 4
-
-cmake -S . -B build-shared -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_CXX_COMPILER=g++-12 -DBUILD_SHARED_LIBS=ON \
-  -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON
 cmake --build build-shared --parallel 3
+cmake --build build-asan --parallel 3
+cmake --build build-tsan-full --parallel 3
+
+ctest --test-dir build-debug --output-on-failure --parallel 4
+ctest --test-dir build-release --output-on-failure --parallel 4
 ctest --test-dir build-shared --output-on-failure --parallel 4
 
-build-release/talon_task_limiter_test --gtest_repeat=30 --gtest_shuffle \
-  --gtest_random_seed=43189 --gtest_brief=1
-```
-
-ASan/UBSan 使用 Clang 12，`TALON_TASK_LIMITER_SANITIZER=address`：
-
-```sh
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   ctest --test-dir build-asan --output-on-failure --parallel 2
-```
-
-安装消费测试会迁移安装前缀，再配置独立消费工程；路径列表包含带空格的额外目录。负向编译检查先证明正常源码可以编译链接，然后要求每个非法用例失败且匹配预期诊断。
-
-## TSan 的完整工具链验证
-
-初版使用未插桩的发行版 libc++，72 项测试曾通过。本次扩大覆盖后，实际有两项报告 future 共享状态释放与 `pthread_cond_wait` 的访问缺少同步：旧配置 **205/207 通过、2 项失败**。这些失败记录保留，没有用重跑直到通过替代调查。
-
-独立的 [future_lifetime.cc](../tests/toolchain/future_lifetime.cc) 只使用标准 promise/future/thread，不包含本库、GTest、自定义 allocator 或额外同步。相同未插桩 libc++ 配置下，它以 TSan 错误退出码 66 复现同样报告。检查 libc++ 源码可见共享计数的原子递减位于未插桩的库实现内；结合独立复现，定位为 TSan 看不到该同步关系。
-
-随后按 [LLVM 12 构建机制](https://releases.llvm.org/12.0.1/projects/libcxx/docs/BuildingLibcxx.html) 在本地编译 libc++ 和 libc++abi，均启用 `-fsanitize=thread`。GTest 和项目代码同样插桩。独立 probe 的 2,000 轮通过，完整项目 207/207 通过。没有给库或测试增加延迟、额外等待或 sanitizer suppression。
-
-```sh
-python3 tools/build_tsan_runtime.py --jobs 4
-runtime_prefix="$PWD/build-toolchain/tsan-runtime"
-cmake -S . -B build-tsan-full -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_CXX_COMPILER=clang++-12 -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON \
-  "-DCMAKE_CXX_FLAGS=-stdlib=libc++ -fsanitize=thread -fno-omit-frame-pointer -isystem $runtime_prefix/include/c++/v1" \
-  "-DCMAKE_EXE_LINKER_FLAGS=-L $runtime_prefix/lib -Wl,-rpath,$runtime_prefix/lib" \
-  -DTALON_TASK_LIMITER_SANITIZER=thread
-cmake --build build-tsan-full --parallel 4
 TSAN_OPTIONS=halt_on_error=1 \
   ctest --test-dir build-tsan-full --output-on-failure --parallel 2
-```
 
-脚本固定 LLVM 12.0.1 三个源码归档的 SHA-256，仅使用 LLVM 的 CMake 模块，不重建编译器。安装位置始终是工作目录中的 `tsan-runtime`，未修改系统 libc++。LLVM 12 的文本链接脚本不能执行 ELF RPATH 重写，构建脚本为该运行库设置 `CMAKE_SKIP_RPATH=ON`，由消费端提供运行库搜索路径。
-
-GCC/libstdc++ 的 TSan `call_once` 异常展开超时仍可由 [once_exception.cc](../tests/toolchain/once_exception.cc) 独立复现；本次未重复跑已知会超时的整套配置，完整验证使用上述工具链。
-
-## 失败到通过的记录
-
-| 原始失败 | 原因与处理 | 当前结果 |
-| --- | --- | --- |
-| 空函数指针提交返回 OK 后退出 139 | 发布前没有检查可空输入；增加校验与额度回滚 | 回归 Passed |
-| TLS 退出回调回归 `timeout 5s` 退出 124 | worker 标记清除过早 | 回归 Passed |
-| sanitizer 外部消费链接失败 | 静态库没有传递运行库链接参数 | 构建和运行 Passed |
-| 多前缀消费配置失败 | 分号参数被拆分 | 安装消费 Passed |
-| 错误构建目录先清理后报错 | 未检查参数和构建标识 | 受控临时目录回归 Passed |
-| Release `-Werror=mismatched-new-delete` | 替换 allocator 同 TU 内联后的 GCC 诊断 | 拆分 TU，保留警告，全部分配测试 Passed |
-| 未插桩 libc++ 的两项 TSan 报告 | 独立标准库程序复现；引用计数同步不可见 | 完整插桩后 Passed |
-| libc++ 安装 RPATH_CHANGE 失败 | CMake 对文本链接脚本做 ELF 修改 | 调整本地工具链配置后安装 Passed |
-
-## 静态检查的范围
-
-```sh
 python3 tools/check_style.py --build-dir build-debug
-clang-tidy-12 src/concurrent_task_limiter.cc -p build-debug \
-  --extra-arg=-std=c++17 \
-  --checks='-*,google-*,readability-braces-around-statements,bugprone-use-after-move,bugprone-exception-escape,bugprone-dangling-handle,clang-analyzer-*'
+build-release/talon_task_limiter_workload_test \
+  --gtest_repeat=5 --gtest_shuffle --gtest_random_seed=73129 --gtest_brief=1
 ```
 
-风格检查包括所有正常项目 TU，编译失败文件检查格式；Windows 条件分支的花括号另作源码检查。高级分析结果仅指生产核心和其头文件，不冒充并发或运行时验证。
+TSan 使用本地构建、完整插桩的标准库，不使用 suppression；工具链和构建命令见 [README](../README.md) 及之前的验证记录。
 
-也执行过全测试 TU 的高级分析。其诊断包括故意抛异常/自身销毁的测试、验证拒绝不移动参数时的 moved-from 报告，以及 talon-status 错误态被错误地继续推导为 value 态的跨过程路径。后者与依赖的 `CheckError` 和 status/object 生命周期不变量矛盾；源码复核及动态验证未支持这些路径为真实缺陷。宽范围诊断保留在 `build-debug/review-tidy.log`，没有改写第三方代码或削弱测试来消除它们。
+各配置日志为 `build-*/workload-upgrade.log`，重复运行记录为 `build-release/workload-repeat.log`；宏预处理证据在 `build-*/macro-odr/{plain,shifted}.ii`。最后补充外部生产者启动失败时的门闩清理后，受影响的两项批量负载又在 ASan/UBSan 和完整 TSan 下重跑通过，日志为对应目录中的 `bulk-final.log`。安装后的正向消费和 17 项负向编译检查都已运行。共享库导出宏的实际定义来自生成的 export.h，动态表通过 `nm -D -C` 检查；没有把 Windows 的生成规则描述成 Windows 运行验证。
 
-## 证据与适用边界
-
-本次日志位于 `build-debug/review-ctest.log`、各配置 `review-run.log`、`build-release/review-stress.log`、`build-debug/style-check.log` 及各构建的 `Testing/Temporary`。故障注入隔离、完整工具链要求与平台限制均是验证范围的一部分。性能原始 CSV 纳入 Git，见 [performance.md](performance.md)。
-
-这些检查不能穷尽所有调度、任意编译器或任意用户回调。外部生命周期、共享数据同步、返回借用引用/view/指针的寿命及应用自身等待依赖仍须符合 [公开契约](../README.md)；也没有把有限基准解释为所有负载下的性能最优。
+这次任务是可读性和验证覆盖扩展，没有据此声称调度性能提升或任意用户代码不会发生依赖死锁。公开生命周期和异常边界仍然适用。

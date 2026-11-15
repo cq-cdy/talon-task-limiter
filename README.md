@@ -4,25 +4,25 @@ C++17 有界任务执行器。保留 `ConcurrentTaskLimiter::Schedule` 的立即
 
 ```cpp
 #include "talon/concurrent_task_limiter.h"
+#include "talon/status_macros.h"
 
-talon::ConcurrentTaskLimiter::Options options;
-options.max_concurrent = 128;  // 正在构造 + 排队 + 执行/清理中的任务总数上限
-options.worker_count = 8;      // 实际工作线程数；0 表示等于 max_concurrent
-auto executor = talon::ConcurrentTaskLimiter::Create(options);
-if (!executor.ok()) {
-  // 处理初始化错误；不要访问失败的 StatusOr。
-  return executor.status();
+talon::StatusOr<int> Compute() {
+  talon::ConcurrentTaskLimiter::Options options;
+  options.max_concurrent = 128;  // 构造、排队、执行和清理中的任务总数上限
+  options.worker_count = 8;      // 工作线程数；0 表示等于 max_concurrent
+  TALON_ASSIGN_OR_RETURN(auto executor,
+                         talon::ConcurrentTaskLimiter::Create(options));
+  TALON_ASSIGN_OR_RETURN(auto future,
+                         executor->Submit([](int x) { return x * 2; }, 21));
+  const int answer = future.get();  // 任务异常仍由 get() 传播
+  TALON_RETURN_IF_ERROR(executor->Shutdown());
+  return answer;
 }
-
-auto result = (*executor)->Submit([](int x) { return x * 2; }, 21);
-if (!result.ok()) {
-  return result.status();  // 满载或关闭；任务没有提交
-}
-int answer = result->get(); // 42；任务异常由 get() 重新抛出
-return (*executor)->Shutdown();
 ```
 
 完整可运行例子见 [examples/basic.cc](examples/basic.cc)。错误类型使用真实的 [talon-status](https://github.com/cq-cdy/talon-status)，没有仿造其接口，也不依赖 Abseil。
+
+状态传播采用依赖的 `TALON_RETURN_IF_ERROR` / `TALON_ASSIGN_OR_RETURN`。公开 target 自动传递 `TALON_STATUS_USE_LINE_COUNTER=1`，保证公共模板的宏展开一致；手动集成需在任何 Talon 宏头之前配置同样的模式，ASSIGN 调用须分行。详见 [状态宏与导出宏](docs/macros-and-exports.md)。
 
 ## 构建与测试
 
@@ -118,6 +118,8 @@ options.on_unhandled_exception = [](std::exception_ptr error) noexcept {
 ## 验证与性能
 
 测试覆盖多提交者饱和、逐任务 exactly-once、关闭竞争、并发 join、空闲唤醒、move-only/过对齐类型、捕获异常、重入、future 生命周期及编译期约束。独立进程注入 `new` 失败，Linux 还注入真实 `pthread_create` 的 `EAGAIN`，验证部分启动回滚。
+
+另有 [CPU/大数据工作负载](docs/workloads.md)：百万级复合计算任务、矩阵分块 fan-in、多池 map/sort/merge 数据 DAG，以及大缓冲区的析构驱动 continuation；所有结果均与参考算法或逐任务账本核对。可用 `ctest -L workload` 单独运行。
 
 ```sh
 cmake --preset asan -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON
