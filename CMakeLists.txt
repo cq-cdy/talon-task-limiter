@@ -10,6 +10,12 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
 else()
   set(talon_task_limiter_top_level OFF)
 endif()
+if(WIN32 AND talon_task_limiter_top_level AND
+   NOT DEFINED CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+  # GoogleTest places its DLLs in bin. Keep standalone test executables and
+  # our DLL alongside them so discovery works without changing the user's PATH.
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
+endif()
 option(TALON_TASK_LIMITER_BUILD_TESTS "Build tests" ${talon_task_limiter_top_level})
 option(TALON_TASK_LIMITER_BUILD_EXAMPLES "Build examples" ${talon_task_limiter_top_level})
 option(TALON_TASK_LIMITER_BUILD_BENCHMARKS "Build throughput benchmark" OFF)

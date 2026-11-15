@@ -96,3 +96,16 @@ ctest --test-dir build-publish-fresh --output-on-failure --parallel 4
 ```
 
 此配置没有使用 `FETCHCONTENT_SOURCE_DIR_*` 覆盖；拉取后的两个依赖 HEAD 分别与 `THIRD_PARTY.md` 中的固定提交一致。构建和测试日志为 `build-publish-fresh/{build,test}.log`。这些本机日志不作为仓库文件发布。远端跨平台结果以 [GitHub Actions](https://github.com/cq-cdy/talon-task-limiter/actions) 的对应提交记录为准，本地通过不等于远端 CI 已通过。
+
+## 首次远端验证发现的可移植性问题
+
+公开推送后首次实际执行 Windows/macOS CI，发现并修复了本机 Linux 检查无法覆盖的问题：
+
+- MSVC 不允许导出 TLS 数据，Reservation 改为仅导出构造/析构；条件编译后可能未使用的模板参数标记 `maybe_unused`。运行时的预留和关闭协议不变。
+- 处理显式过对齐带来的 MSVC C4324；仅在故障注入测试目标中处理故意抛出构造异常导致的 C4702。保留 `/W4 /WX`、全部测试及严格断言。
+- 结果移动异常测试使用非默认构造的结果，并核对 future 就绪前已执行一次移动。MSVC promise 对默认构造结果的赋值限制已在 README 公开说明。
+- 死亡测试在真正触发终止的线程上安装处理器，继续精确要求退出码 73。MSVC 的终止处理器具有线程局部语义，原来仅在主线程设置并不足够。
+- 独立 Windows 构建默认将程序及 DLL 放在同一运行目录；消费探针的 `try_compile` 显式使用被安装库的配置，避免 Release 库与 Debug CRT 混用。
+- 更新已退役的 macOS runner，修正 Ubuntu Clang 12 运行库包名，并为 Windows 直接编译器探针准备 MSVC 环境。
+
+Linux 普通配置有 256 项，Windows/macOS 有 240 项；相差的 16 项是 Linux 专用 pthread 创建故障注入。Sanitizer 配置仍为 230 项。各次失败和后续重验均保留在 Actions 历史中，最终状态以具体提交为准。

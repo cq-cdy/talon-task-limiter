@@ -36,6 +36,14 @@ cmake --build build --parallel 4
 ctest --test-dir build --output-on-failure --parallel 4
 ```
 
+Windows 使用 Visual Studio 时，请在 x64 开发者命令提示符中运行配置，保证编译器探针能找到标准头文件。Visual Studio 是多配置生成器，构建和测试还需明确配置：
+
+```sh
+cmake --build build --config Release --parallel 4
+ctest --test-dir build -C Release --output-on-failure --parallel 2
+cmake --install build --config Release --prefix /your/prefix
+```
+
 依赖解析顺序是：已有 CMake target → 已安装 package → 固定提交的 FetchContent。GoogleTest 仅用于测试。首次下载需要网络；没有跟踪 `main` / `master` 的浮动依赖。
 
 如果系统中有不兼容的 GoogleTest（例如 Conda 与系统 C++ 运行库混用），使用 `-DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON`，由当前工具链编译固定版本。离线源码覆盖示例：

@@ -48,6 +48,7 @@ list(LENGTH prefix_path expected_prefix_count)
 string(REPLACE ";" "\\;" escaped_prefix_path "${prefix_path}")
 set(common -G "${GENERATOR}" "-DCMAKE_CXX_COMPILER=${CXX_COMPILER}"
   "-DCMAKE_BUILD_TYPE=${CONFIG}" "-DCMAKE_PREFIX_PATH=${escaped_prefix_path}"
+  "-DCMAKE_TRY_COMPILE_CONFIGURATION=${CONFIG}"
   "-DEXPECTED_PREFIX_COUNT=${expected_prefix_count}"
   "-Dtalon-status_DIR=${STATUS_DIR}"
   "-DCMAKE_CXX_FLAGS=${CXX_FLAGS}"

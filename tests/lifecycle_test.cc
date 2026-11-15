@@ -514,9 +514,12 @@ TEST(Exceptions, SubmitDoesNotCallScheduleExceptionHandler) {
 TEST(ExceptionsDeathTest, MissingHandlerTerminates) {
   EXPECT_EXIT(
       {
-        std::set_terminate([] { std::_Exit(73); });
         ConcurrentTaskLimiter limiter(1);
-        static_cast<void>(limiter.Schedule([] { throw 42; }));
+        static_cast<void>(limiter.Schedule([] {
+          // MSVC keeps the terminate handler in thread-local CRT state.
+          std::set_terminate([] { std::_Exit(73); });
+          throw 42;
+        }));
         static_cast<void>(limiter.WaitIdle());
       },
       ::testing::ExitedWithCode(73), "");
@@ -525,9 +528,11 @@ TEST(ExceptionsDeathTest, MissingHandlerTerminates) {
 TEST(ExceptionsDeathTest, ThrowingHandlerTerminates) {
   EXPECT_EXIT(
       {
-        std::set_terminate([] { std::_Exit(73); });
         ConcurrentTaskLimiter::Options options;
-        options.on_unhandled_exception = [](std::exception_ptr) { throw 17; };
+        options.on_unhandled_exception = [](std::exception_ptr) {
+          std::set_terminate([] { std::_Exit(73); });
+          throw 17;
+        };
         ConcurrentTaskLimiter limiter(options);
         static_cast<void>(limiter.Schedule([] { throw 42; }));
         static_cast<void>(limiter.WaitIdle());
@@ -538,10 +543,10 @@ TEST(ExceptionsDeathTest, ThrowingHandlerTerminates) {
 TEST(LifecycleDeathTest, DestructionOnOwnWorkerTerminates) {
   EXPECT_EXIT(
       {
-        std::set_terminate([] { std::_Exit(73); });
         auto* limiter = new ConcurrentTaskLimiter(1);
         Gate proceed;
         static_cast<void>(limiter->Schedule([&] {
+          std::set_terminate([] { std::_Exit(73); });
           proceed.Wait();
           delete limiter;
         }));
