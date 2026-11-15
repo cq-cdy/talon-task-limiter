@@ -72,3 +72,27 @@ TSan 使用本地构建、完整插桩的标准库，不使用 suppression；工
 各配置日志为 `build-*/workload-upgrade.log`，重复运行记录为 `build-release/workload-repeat.log`；宏预处理证据在 `build-*/macro-odr/{plain,shifted}.ii`。最后补充外部生产者启动失败时的门闩清理后，受影响的两项批量负载又在 ASan/UBSan 和完整 TSan 下重跑通过，日志为对应目录中的 `bulk-final.log`。安装后的正向消费和 17 项负向编译检查都已运行。共享库导出宏的实际定义来自生成的 export.h，动态表通过 `nm -D -C` 检查；没有把 Windows 的生成规则描述成 Windows 运行验证。
 
 这次任务是可读性和验证覆盖扩展，没有据此声称调度性能提升或任意用户代码不会发生依赖死锁。公开生命周期和异常边界仍然适用。
+
+## 公开发布前复核
+
+2026-11-15 再次检查 `8f118b8` 的库实现、接口约束、任务所有权、预留回滚、TLS 自等待保护、锁顺序、关闭竞争、安装导出和 CI 配置，未发现新的明确实现缺陷。本轮没有修改库实现或测试断言；不能据此保证任意用户任务不存在依赖死锁。
+
+| 配置 / 检查 | 状态 | 本轮实测结果 |
+| --- | --- | --- |
+| GCC 11 Debug / GCC 12 Release / GCC 12 共享库 | Passed | 各 256/256 |
+| 全新目录，联网拉取固定依赖，GCC 11 Release | Passed | 256/256，包含安装消费与负向编译检查 |
+| Clang 12 ASan/UBSan，开启 leak detection | Passed | 230/230 |
+| Clang 12 TSan，完整插桩 libc++/libc++abi/GTest | Passed | 230/230 |
+| Google 格式及花括号 | Static check only | 47 个文件、25 个编译单元通过 |
+| 发布文件与三次既有提交的凭据模式检查 | Static check only | 未发现所检查的凭据模式，跟踪文件不包含构建产物 |
+
+已有配置的命令与上文相同；新日志为 `build-{debug,release,shared,asan,tsan-full}/prepublish-{build,test}.log` 和 `build-debug/prepublish-style.log`。全新依赖验证实际执行：
+
+```sh
+cmake -S . -B build-publish-fresh -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON
+cmake --build build-publish-fresh --parallel 4
+ctest --test-dir build-publish-fresh --output-on-failure --parallel 4
+```
+
+此配置没有使用 `FETCHCONTENT_SOURCE_DIR_*` 覆盖；拉取后的两个依赖 HEAD 分别与 `THIRD_PARTY.md` 中的固定提交一致。构建和测试日志为 `build-publish-fresh/{build,test}.log`。这些本机日志不作为仓库文件发布。远端跨平台结果以 [GitHub Actions](https://github.com/cq-cdy/talon-task-limiter/actions) 的对应提交记录为准，本地通过不等于远端 CI 已通过。

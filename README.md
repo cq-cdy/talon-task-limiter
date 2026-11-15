@@ -29,6 +29,8 @@ talon::StatusOr<int> Compute() {
 需要 CMake ≥ 3.20、C++17 编译器、标准线程库和 C++ 异常支持。
 
 ```sh
+git clone https://github.com/cq-cdy/talon-task-limiter.git
+cd talon-task-limiter
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel 4
 ctest --test-dir build --output-on-failure --parallel 4
